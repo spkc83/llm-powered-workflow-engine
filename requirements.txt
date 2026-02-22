@@ -1,0 +1,10 @@
+google-adk
+pyyaml
+python-dotenv
+fastapi
+uvicorn[standard]
+pytest
+pytest-asyncio
+shiny
+aiosqlite
+httpx
