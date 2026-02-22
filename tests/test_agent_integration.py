@@ -198,4 +198,6 @@ class TestCreateRouterAgent:
 
     def test_router_uses_gemini_model(self, registry: ProcedureRegistry):
         agent = create_router_agent(registry)
-        assert "gemini" in agent.model.lower()
+        # agent.model is a Gemini BaseLlm instance; check its model name
+        model_name = agent.model.model if hasattr(agent.model, "model") else str(agent.model)
+        assert "gemini" in model_name.lower()
