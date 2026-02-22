@@ -160,7 +160,7 @@ async def search_orders(
     customer_id: str,
     tool_context: ToolContext,
     merchant_name: str = "",
-    amount: float = 0,
+    amount: float = 0.0,
     date: str = "",
 ) -> dict:
     """Search for orders by customer ID and optional filters (merchant name, amount, date).
