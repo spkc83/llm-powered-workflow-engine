@@ -105,7 +105,8 @@ app_ui = ui.page_sidebar(
         ui.hr(),
         ui.h4("Session"),
         ui.output_text("session_id_display"),
-        ui.input_action_button("new_session", "New Session", class_="btn-outline-primary w-100"),
+        ui.input_action_button("new_session", "New Session", class_="btn-outline-primary w-100 mb-2"),
+        ui.output_ui("session_history"),
         ui.hr(),
         ui.h4("Workflow State"),
         ui.output_ui("workflow_state_display"),
@@ -286,18 +287,78 @@ def server(input, output, session):
 
     # --- Session management ---
 
+    # Track known sessions: list of {session_id, label}
+    session_list = reactive.value([])
+
+    async def _load_session_history():
+        """Fetch session list from backend for the current user."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{API_BASE}/api/sessions",
+                    params={"user_id": _get_user_id()},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                session_list.set(data.get("sessions", []))
+        except Exception:
+            pass
+
     @reactive.effect
     @reactive.event(input.new_session)
     async def _new_session():
         session_id.set(None)
         workflow_state.set({})
         await chat.clear_messages()
-        await chat.append_message({"role": "assistant", "content": "Session cleared. Type a message to start fresh."})
+        await chat.append_message({"role": "assistant", "content": "New session started. Type a message to begin."})
 
     @render.text
     def session_id_display():
         sid = session_id()
         return f"ID: {sid[:12]}..." if sid else "No active session"
+
+    @render.ui
+    async def session_history():
+        """Render a session history selector."""
+        await _load_session_history()
+        sessions = session_list()
+        if not sessions:
+            return ui.tags.small("No previous sessions", class_="text-muted")
+        choices = {}
+        for s in sessions:
+            sid = s["session_id"]
+            proc = s.get("procedure", "")
+            status = s.get("status", "")
+            label = f"{sid[:8]}..."
+            if proc:
+                label += f" ({proc})"
+            if status:
+                label += f" [{status}]"
+            choices[sid] = label
+        return ui.tags.div(
+            ui.tags.small("Previous sessions:", class_="text-muted"),
+            ui.input_select("session_select", None, choices=choices, width="100%"),
+            ui.input_action_button(
+                "restore_session", "Restore Session",
+                class_="btn-outline-secondary btn-sm w-100 mt-1",
+            ),
+        )
+
+    @reactive.effect
+    @reactive.event(input.restore_session)
+    async def _restore_session():
+        """Switch to a previously saved session."""
+        sid = input.session_select()
+        if not sid:
+            return
+        session_id.set(sid)
+        workflow_state.set({})
+        await chat.clear_messages()
+        await chat.append_message({
+            "role": "assistant",
+            "content": f"Restored session `{sid[:12]}...`. Send a message to continue the conversation.",
+        })
+        await _refresh_workflow_state()
 
     # --- Test scenario handlers ---
 

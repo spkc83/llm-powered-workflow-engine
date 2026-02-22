@@ -145,6 +145,44 @@ List all customers. Used by the Shiny UI customer selector.
 
 ---
 
+### GET /api/sessions
+
+List all sessions for a user. Used by the Shiny UI session history to allow switching between conversations.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `user_id` | string | yes | The user ID to list sessions for |
+
+**Response (200):**
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "procedure": "Customer Service - Refund Request",
+      "status": "completed"
+    },
+    {
+      "session_id": "f1e2d3c4-b5a6-7890-fedc-ba0987654321",
+      "procedure": "",
+      "status": ""
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sessions` | array | List of session objects |
+| `sessions[].session_id` | string | The session ID |
+| `sessions[].procedure` | string | Name of the active/completed procedure (empty if none) |
+| `sessions[].status` | string | Workflow status: `in_progress`, `completed`, `escalated`, or empty |
+
+---
+
 ### GET /api/tables/{table_name}
 
 Browse the contents of a database table. Used by the Shiny data browser.

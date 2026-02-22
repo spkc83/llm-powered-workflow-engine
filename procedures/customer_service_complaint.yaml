@@ -14,18 +14,16 @@ procedure:
   steps:
     - id: greet_and_collect
       instruction: >
-        Greet the customer warmly and express genuine concern right away — this customer is
-        likely frustrated or upset. Lead with empathy before anything else. Do not rush to
-        collect information; first acknowledge that you are sorry they are having a difficult
-        experience and that you are here to help.
-        Then, ask the customer to describe what happened in their own words. If the complaint
-        is related to an order, the customer may provide an order number (e.g., "ORD-123") OR
-        describe the purchase naturally (e.g., "the headphones I got from TechMart"). Accept
-        either form. Collect as much detail as possible about the nature of the complaint.
-        Example: "I'm really sorry to hear you've had a frustrating experience — that's not
-        the standard we hold ourselves to, and I want to make this right for you. Could you
-        please tell me a bit more about what happened? If this relates to an order, your order
-        number or a description of the purchase (store name, item, amount) would be very helpful."
+        Check the customer's message for complaint details and ANY order identification
+        clues — this includes: an explicit order number (e.g., "ORD-123"), OR natural
+        language like a store/merchant name, item description, approximate amount, or time
+        reference. Also look for the nature of the complaint (quality, delivery, billing, etc.).
+        If ANY identifiable details are present, acknowledge with empathy and IMMEDIATELY
+        proceed to the identify_issue step — do NOT stop and wait for another message.
+        Do NOT ask for an order ID when the customer has already described their purchase.
+        Only if the message contains NO complaint details at all, greet warmly with empathy
+        and ask them to describe what happened and what they purchased (store name, item,
+        approximate amount). Never ask for an order ID.
       action: collect_info
       required_info:
         - complaint_description
@@ -55,19 +53,18 @@ procedure:
 
     - id: lookup_context
       instruction: >
-        Pull up the relevant order or account information to better understand the context
-        of the complaint:
-        - If the customer provided an order ID (e.g., "ORD-123"), use the `lookup_order` tool.
-        - If the customer described their purchase (store name, item, amount), use the
-          `search_orders` tool with their customer_id and the details they provided. If
-          multiple matches are returned, present them and ask the customer to confirm which one.
-        Retrieve order details such as order date, items, shipping status, delivery date,
-        and any previous case notes. This context will help you offer an informed resolution.
-        While looking up the information, reassure the customer: "Let me pull up the details
-        of your order so I can better understand what happened and find the best solution
-        for you."
+        Pull up the relevant order using the information available. Choose the right tool:
+        - If the customer gave an EXACT order ID (e.g., "ORD-123"), use `lookup_order`.
+        - In ALL other cases (store name, item description, amount, date, or any natural
+          language clues), use `search_orders`. Extract the details:
+          * merchant_name: the store or brand name mentioned
+          * amount: any dollar figure mentioned. The tool searches ±10%.
+          * date: estimate from time references ("last week" → approximate date)
+          * customer_id: use the customer ID from the current session context
+          Pass whatever details you have — even partial info is enough.
+        If the search returns multiple matches, present them and ask the customer to confirm.
         Whether the lookup succeeds or fails, proceed to attempt a resolution — if the lookup
-        fails, you will work with the information the customer has provided directly.
+        fails, work with the information the customer has provided directly.
       action: tool_call
       tool: lookup_order
       tools:

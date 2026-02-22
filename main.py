@@ -222,6 +222,28 @@ async def get_table_data(table_name: str) -> dict:
     return {"table": table_name, "rows": rows, "count": len(rows)}
 
 
+@app.get("/api/sessions")
+async def list_sessions(user_id: str) -> dict:
+    """List all sessions for a user.
+
+    Returns session IDs and basic metadata so the UI can offer a session
+    switcher.  Ordered newest-first by looking at the ADK session store.
+    """
+    resp = await session_service.list_sessions(
+        app_name="workflow_engine",
+        user_id=user_id,
+    )
+    result = []
+    for s in (resp.sessions if resp and resp.sessions else []):
+        state = dict(s.state) if s.state else {}
+        result.append({
+            "session_id": s.id,
+            "procedure": state.get("current_procedure_name", ""),
+            "status": state.get("workflow_status", ""),
+        })
+    return {"sessions": result}
+
+
 @app.get("/health")
 async def health() -> dict:
     """Health check endpoint."""

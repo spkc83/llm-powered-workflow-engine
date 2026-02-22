@@ -155,6 +155,8 @@ def build_agent_instructions(procedure: dict, persona: str) -> str:
         if step["action"] == "collect_info" and "required_info" in step:
             info_list = ", ".join(step["required_info"])
             lines.append(f"  → You must collect: {info_list}")
+            lines.append(f"  → IMPORTANT: If this information is already present in the user's message, "
+                         f"skip collection and immediately proceed to the next step.")
 
         # Branching conditions
         if step["action"] == "evaluate" and "conditions" in step and step["conditions"]:
@@ -205,4 +207,7 @@ def get_procedure_tools(procedure: dict) -> list[str]:
     for step in procedure.get("steps", []):
         if "tool" in step:
             tools.add(step["tool"])
+        # Also extract from the plural "tools" key (list of additional tools)
+        if "tools" in step and isinstance(step["tools"], list):
+            tools.update(step["tools"])
     return sorted(tools)
