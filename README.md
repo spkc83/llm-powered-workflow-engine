@@ -11,6 +11,7 @@ A procedure-driven workflow engine built on [Google ADK](https://google.github.i
 │                      │          │                       │
 │  - Chat panel        │          │  - /api/chat          │
 │  - Customer selector │          │  - /api/customers     │
+│  - Session history   │          │  - /api/sessions      │
 │  - Test scenarios    │          │  - /api/procedures    │
 │  - Workflow state    │          │  - /api/session/{id}  │
 │  - Data browser tab  │          │  - /api/tables/{name} │
@@ -236,6 +237,7 @@ State is accessible via the `GET /api/session/{session_id}/state` endpoint.
 |--------|----------|-------------|
 | `POST` | `/api/chat` | Send a message, get agent response |
 | `GET` | `/api/customers` | List all customers (for UI selector) |
+| `GET` | `/api/sessions?user_id=...` | List all sessions for a user |
 | `GET` | `/api/procedures` | List all loaded procedures |
 | `GET` | `/api/session/{id}/state?user_id=...` | Get workflow state for a session |
 | `GET` | `/api/tables/{name}` | Browse database table contents |

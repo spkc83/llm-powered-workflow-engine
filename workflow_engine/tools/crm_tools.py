@@ -165,13 +165,15 @@ async def search_orders(
 ) -> dict:
     """Search for orders by customer ID and optional filters (merchant name, amount, date).
 
-    Use this when a customer describes a purchase without providing an order ID.
+    Use this tool when a customer describes a purchase using natural language instead of
+    providing an exact order ID. You can pass ANY combination of the optional filters —
+    even just one (e.g., only merchant_name) is enough to narrow the search.
 
     Args:
         customer_id: The customer ID to search orders for (required).
-        merchant_name: Partial or full merchant/store name to filter by.
-        amount: Approximate order total to filter by (matches within ±10%).
-        date: Order date to filter by (ISO format, e.g. "2026-02-15").
+        merchant_name: Partial or full merchant/store name (e.g., "TechMart"). Case-insensitive partial match.
+        amount: Approximate order total (e.g., 80 for "about $80"). Matches within ±10%.
+        date: Order date in ISO format (e.g., "2026-02-15"). Omit if not known precisely.
     """
     # Build query with dynamic filters
     conditions = ["o.customer_id = ?"]

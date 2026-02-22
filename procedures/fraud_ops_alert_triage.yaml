@@ -13,14 +13,12 @@ procedure:
   steps:
     - id: receive_alert
       instruction: >
-        Begin the triage session by obtaining the fraud alert ID from the analyst or the
-        automated alerting system. Ask the analyst to provide the alert ID if it has not
-        already been supplied. Once the alert ID is available, retrieve the full alert
-        details from the fraud monitoring system. This will include: alert type, alert
-        creation timestamp, the account or customer associated with the alert, the
-        triggering event or transaction, and an initial risk score if available.
-        Acknowledge receipt of the alert and confirm you are initiating the triage process.
-        Example: "Alert [ALERT_ID] received. Pulling full alert details now to begin triage."
+        Check whether the analyst's message already contains a fraud alert ID (e.g.,
+        "FA-001"). If the alert ID IS already present, immediately call `get_fraud_alert`
+        with that ID — do NOT respond with just an acknowledgment and wait for another message.
+        If the alert ID is NOT present, ask the analyst to provide it.
+        Once the alert is retrieved, its details will include: alert type, creation timestamp,
+        the associated account or customer, the triggering event, and an initial risk score.
         If the alert cannot be found, transition to alert_not_found.
       action: tool_call
       tool: get_fraud_alert

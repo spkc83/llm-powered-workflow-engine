@@ -12,17 +12,17 @@ procedure:
   steps:
     - id: greet_and_collect
       instruction: >
-        Greet the customer warmly and professionally. Express that you are happy to help them today.
-        Let them know you will assist with their refund or return request.
-        The customer may provide their order number (e.g., "ORD-123") OR describe their purchase
-        naturally (e.g., "I bought headphones from TechMart last week for about $80"). Accept
-        either form — you do not need an exact order ID. If they describe the purchase, note the
-        store/merchant name, item description, approximate amount, and approximate date.
-        Be patient and reassuring — refund situations can be frustrating for customers. If the
-        customer seems upset, acknowledge their feelings before asking for information.
-        Example: "I'm so sorry to hear you're having this issue. I'd be happy to look into this
-        for you right away. Could you please share your order number, or describe what you
-        purchased (the store name, item, and approximate amount)?"
+        Check the customer's message for ANY order identification details — this includes:
+        an explicit order number (e.g., "ORD-123"), OR any natural language clues such as
+        a store/merchant name ("from TechMart"), item description ("headphones"), approximate
+        amount ("about $80"), or time reference ("last week", "yesterday").
+        If ANY of these details are present, you have enough to proceed — acknowledge briefly
+        and IMMEDIATELY move to the lookup_order step. Do NOT ask for an order ID when the
+        customer has already described their purchase. Do NOT stop and wait for another message.
+        Only if the message contains NO identifiable purchase details at all (e.g., the customer
+        just says "I want a refund" with no context), then greet warmly and ask them to describe
+        what they purchased — the store name, item, and approximate amount. Never ask for an
+        order ID — customers rarely know it.
       action: collect_info
       required_info:
         - order_identifier_or_description
@@ -30,16 +30,19 @@ procedure:
 
     - id: lookup_order
       instruction: >
-        Find the customer's order using the information they provided:
-        - If the customer gave an order ID (e.g., "ORD-123"), use the `lookup_order` tool directly.
-        - If the customer described their purchase (store name, item, amount, date), use the
-          `search_orders` tool with their customer_id and whatever details they provided
-          (merchant_name, amount, date). If the search returns multiple matches, present the
-          options to the customer and ask them to confirm which order. If exactly one match is
-          found, proceed with that order.
-        Once the order is retrieved, briefly inform the customer of the order details to confirm
-        you have the correct one. For example: "I found your order from TechMart placed on
-        January 15th for Wireless Headphones ($79.99). Let me check the refund eligibility."
+        Find the customer's order using the information available. Choose the right tool:
+        - If the customer gave an EXACT order ID (e.g., "ORD-123"), use `lookup_order`.
+        - In ALL other cases (store name, item description, amount, date, or any combination
+          of natural language clues), use `search_orders`. Extract the details:
+          * merchant_name: the store or brand name mentioned (e.g., "TechMart", "SportZone")
+          * amount: any dollar figure mentioned (e.g., "$80" → 80). The tool searches ±10%.
+          * date: estimate from time references ("last week" → approximate date string)
+          * customer_id: use the customer ID from the current session context
+          Pass whatever details you have — even partial info (just a merchant name) is enough.
+        If the search returns multiple matches, present them and ask the customer to confirm.
+        If exactly one match is found, proceed with it.
+        Once the order is retrieved, briefly confirm the details with the customer: "I found
+        your order from [merchant] placed on [date] for [items] ($[total])."
         If the lookup fails or no orders are found, transition to the order_not_found step.
       action: tool_call
       tool: lookup_order
