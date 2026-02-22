@@ -1,6 +1,7 @@
 """CRM tools for customer service operations, backed by SQLite."""
 
 from datetime import datetime
+from typing import Optional
 
 from google.adk.tools import ToolContext
 
@@ -159,9 +160,9 @@ async def update_case_status(case_id: str, status: str, notes: str, tool_context
 async def search_orders(
     customer_id: str,
     tool_context: ToolContext,
-    merchant_name: str = "",
-    amount: float = 0.0,
-    date: str = "",
+    merchant_name: Optional[str] = None,
+    amount: Optional[float] = None,
+    date: Optional[str] = None,
 ) -> dict:
     """Search for orders by customer ID and optional filters (merchant name, amount, date).
 
@@ -172,7 +173,7 @@ async def search_orders(
     Args:
         customer_id: The customer ID to search orders for (required).
         merchant_name: Partial or full merchant/store name (e.g., "TechMart"). Case-insensitive partial match.
-        amount: Approximate order total (e.g., 80 for "about $80"). Matches within ±10%.
+        amount: Approximate order total (e.g., 80.0 for "about $80"). Matches within ±10%.
         date: Order date in ISO format (e.g., "2026-02-15"). Omit if not known precisely.
     """
     # Build query with dynamic filters
@@ -183,7 +184,7 @@ async def search_orders(
         conditions.append("o.merchant_name LIKE ?")
         params.append(f"%{merchant_name}%")
 
-    if amount > 0:
+    if amount is not None and amount > 0:
         lower = amount * 0.9
         upper = amount * 1.1
         conditions.append("o.total BETWEEN ? AND ?")
