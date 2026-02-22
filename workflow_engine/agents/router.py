@@ -1,6 +1,7 @@
 """Router agent and general Q&A agent definitions."""
 from google.adk.agents import Agent
 
+from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
 from .customer_service import create_customer_service_agent
 from .fraud_ops import create_fraud_ops_agent
@@ -33,7 +34,8 @@ def create_general_agent() -> Agent:
     """Create a general-purpose Q&A agent for fallback handling."""
     return Agent(
         name="general_agent",
-        model="gemini-2.5-flash",
+        model=create_model(),
+        generate_content_config=get_generate_content_config(),
         description=(
             "Handles general questions, greetings, and conversations that don't "
             "relate to customer service orders/refunds or fraud operations. "
@@ -70,7 +72,8 @@ def create_router_agent(registry: ProcedureRegistry) -> Agent:
 
     return Agent(
         name="router_agent",
-        model="gemini-2.5-flash",
+        model=create_model(),
+        generate_content_config=get_generate_content_config(),
         description="Main router that directs users to the appropriate specialist agent.",
         instruction=ROUTER_INSTRUCTION,
         sub_agents=[cs_agent, fraud_agent, general_agent],

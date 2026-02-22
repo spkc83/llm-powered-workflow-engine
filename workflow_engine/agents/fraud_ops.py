@@ -1,6 +1,7 @@
 """Fraud operations agent factory."""
 from google.adk.agents import Agent
 
+from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
 from ..tools.fraud_tools import (
@@ -95,7 +96,8 @@ def create_fraud_ops_agent(registry: ProcedureRegistry) -> Agent:
 
     return Agent(
         name="fraud_ops_agent",
-        model="gemini-2.5-flash",
+        model=create_model(),
+        generate_content_config=get_generate_content_config(),
         description=description,
         instruction=combined_instructions,
         tools=tools,

@@ -29,7 +29,7 @@ A procedure-driven workflow engine built on [Google ADK](https://google.github.i
 ### Agent Hierarchy
 
 ```
-router_agent (Gemini 2.5 Flash)
+router_agent (configurable — default: Gemini 2.5 Flash)
 ├── customer_service_agent — orders, refunds, returns, complaints
 │   └── Tools: lookup_order, search_orders, get_customer_profile,
 │             issue_refund, update_case_status, escalate_to_supervisor,
@@ -61,9 +61,16 @@ cd llm-powerd-workflow-engine
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure your API key
+# Configure your API key and model settings
 echo 'GOOGLE_API_KEY="your-key-here"' > .env
 echo 'GOOGLE_GENAI_USE_VERTEXAI=FALSE' >> .env
+
+# Optional: customize LLM model and parameters
+echo 'LLM_MODEL=gemini-2.5-flash' >> .env
+echo 'LLM_TEMPERATURE=0.7' >> .env
+# echo 'LLM_TOP_P=0.9' >> .env
+# echo 'LLM_TOP_K=40' >> .env
+# echo 'LLM_MAX_OUTPUT_TOKENS=8192' >> .env
 ```
 
 ### Run
@@ -125,6 +132,7 @@ pytest tests/ -v
 │   └── fraud_ops_alert_triage.yaml
 │
 ├── workflow_engine/                # Core engine package
+│   ├── config.py                   # LLM model config — google.genai Client, model name, generation params
 │   ├── agent.py                    # ADK entry point — registry + root_agent
 │   │
 │   ├── agents/                     # Agent factories
@@ -162,6 +170,22 @@ pytest tests/ -v
     ├── test_agent_integration.py   # Integration tests
     └── test_api.py                 # FastAPI endpoint tests
 ```
+
+## Configuration
+
+All agents use a shared `google.genai.Client` configured from environment variables. Settings go in `.env` or the shell environment.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GOOGLE_API_KEY` | Google AI API key (required) | — |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Set to `TRUE` to use Vertex AI backend | `FALSE` |
+| `LLM_MODEL` | Model name for all agents | `gemini-2.5-flash` |
+| `LLM_TEMPERATURE` | Sampling temperature (0.0–2.0) | model default |
+| `LLM_TOP_P` | Top-p nucleus sampling | model default |
+| `LLM_TOP_K` | Top-k sampling | model default |
+| `LLM_MAX_OUTPUT_TOKENS` | Maximum output tokens | model default |
+
+The configuration is centralized in `workflow_engine/config.py`. Each agent receives a `Gemini` model instance backed by the shared Client, so changing `LLM_MODEL` or generation parameters in `.env` applies to all agents.
 
 ## Key Concepts
 
