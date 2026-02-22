@@ -1,0 +1,102 @@
+"""Fraud operations agent factory."""
+from google.adk.agents import Agent
+
+from ..procedures.registry import ProcedureRegistry
+from ..procedures.loader import build_agent_instructions, get_procedure_tools
+from ..tools.fraud_tools import (
+    get_fraud_alert,
+    get_account_transactions,
+    check_device_fingerprint,
+    flag_account,
+    submit_sar,
+    close_alert,
+)
+from ..tools.common_tools import escalate_to_supervisor, add_case_note
+
+
+FRAUD_PERSONA = """You are a skilled fraud operations analyst responsible for triaging
+and investigating fraud alerts. Your role is to systematically gather evidence, assess
+risk, and take appropriate action to protect customers and the organization.
+
+Approach each alert methodically:
+1. Retrieve and review the alert details
+2. Gather supporting evidence (transactions, device data)
+3. Assess the cumulative risk based on all available signals
+4. Take decisive action (flag, clear, or escalate)
+5. Document findings thoroughly for compliance and audit
+
+Important guidelines:
+- Be thorough and systematic — never skip evidence gathering steps for high-severity alerts
+- Base determinations on the totality of evidence, not single signals
+- Document everything with precision — your notes serve as the audit trail
+- When in doubt, escalate to a senior analyst rather than making an uncertain determination
+- Follow SAR filing thresholds and regulatory requirements
+- Use professional, factual language in all communications and documentation
+"""
+
+# Map tool name strings (from YAML) to actual Python functions
+TOOL_MAP = {
+    "get_fraud_alert": get_fraud_alert,
+    "get_account_transactions": get_account_transactions,
+    "check_device_fingerprint": check_device_fingerprint,
+    "flag_account": flag_account,
+    "submit_sar": submit_sar,
+    "close_alert": close_alert,
+    "escalate_to_supervisor": escalate_to_supervisor,
+    "add_case_note": add_case_note,
+}
+
+
+def create_fraud_ops_agent(registry: ProcedureRegistry) -> Agent:
+    """Create a fraud operations agent with procedure-driven instructions.
+
+    Args:
+        registry: The loaded procedure registry.
+
+    Returns:
+        A configured ADK Agent for fraud operations.
+    """
+    # Get all fraud procedures
+    fraud_procedures = registry.get_procedures_for_domain("fraud")
+
+    # Build combined instructions from all fraud procedures
+    instruction_parts = [FRAUD_PERSONA]
+
+    # Collect all tool names needed
+    all_tool_names = set()
+
+    for proc in fraud_procedures:
+        proc_instructions = build_agent_instructions(proc, "")
+        instruction_parts.append(proc_instructions)
+        tool_names = get_procedure_tools(proc)
+        all_tool_names.update(tool_names)
+
+    combined_instructions = "\n---\n\n".join(instruction_parts)
+
+    # Resolve tool functions from names
+    tools = []
+    seen = set()
+    for name in sorted(all_tool_names):
+        if name in TOOL_MAP and name not in seen:
+            tools.append(TOOL_MAP[name])
+            seen.add(name)
+
+    # Build trigger intent keywords for the description
+    all_intents = []
+    for proc in fraud_procedures:
+        all_intents.extend(proc.get("trigger_intents", []))
+
+    description = (
+        "Handles fraud operations including: "
+        + ", ".join(all_intents)
+        + ". Use this agent when an analyst needs to triage fraud alerts, "
+        "investigate suspicious activity, or take action on flagged accounts."
+    )
+
+    return Agent(
+        name="fraud_ops_agent",
+        model="gemini-2.5-flash",
+        description=description,
+        instruction=combined_instructions,
+        tools=tools,
+    )
