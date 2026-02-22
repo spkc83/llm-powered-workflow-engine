@@ -37,8 +37,8 @@ procedure:
           * merchant_name: the store or brand name mentioned (e.g., "TechMart", "SportZone")
           * amount: any dollar figure mentioned (e.g., "$80" → 80). The tool searches ±10%.
           * date: estimate from time references ("last week" → approximate date string)
-          * customer_id: use the customer ID from the current session context
-          Pass whatever details you have — even partial info (just a merchant name) is enough.
+          * customer_id: use the user_id (which is the customer's ID, e.g., "CUST-456")
+          Pass whatever details you have — even just the merchant_name alone is enough.
         If the search returns multiple matches, present them and ask the customer to confirm.
         If exactly one match is found, proceed with it.
         Once the order is retrieved, briefly confirm the details with the customer: "I found

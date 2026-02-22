@@ -60,8 +60,8 @@ procedure:
           * merchant_name: the store or brand name mentioned
           * amount: any dollar figure mentioned. The tool searches ±10%.
           * date: estimate from time references ("last week" → approximate date)
-          * customer_id: use the customer ID from the current session context
-          Pass whatever details you have — even partial info is enough.
+          * customer_id: use the user_id (which is the customer's ID, e.g., "CUST-456")
+          Pass whatever details you have — even just the merchant_name alone is enough.
         If the search returns multiple matches, present them and ask the customer to confirm.
         Whether the lookup succeeds or fails, proceed to attempt a resolution — if the lookup
         fails, work with the information the customer has provided directly.
