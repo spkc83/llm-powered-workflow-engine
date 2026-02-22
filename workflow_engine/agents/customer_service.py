@@ -41,8 +41,10 @@ CRITICAL — Infer details from natural language, do NOT ask for order IDs:
   * Approximate amount: "for about $80" → amount=80
   * Date hints: "last week", "yesterday", "a month ago" → estimate the date
   * Item description: use this to confirm the right order after search results
-- The `search_orders` tool accepts: customer_id (from the session), merchant_name,
-  amount (searches ±10%), and date. Provide whatever details you can extract.
+- The `search_orders` tool requires customer_id and accepts optional merchant_name,
+  amount (searches ±10%), and date. The customer_id is always available — use the
+  user's customer ID from the conversation context (it is the same as the user_id).
+  Provide whatever details you can extract; even just the merchant_name alone is enough.
 - Only ask the customer for more details if `search_orders` returns zero results or
   too many ambiguous results. Even then, ask clarifying questions about the purchase
   (which store? what item? how much?) — not for an order ID.

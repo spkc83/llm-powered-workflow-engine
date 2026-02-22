@@ -1,6 +1,6 @@
 """CRM tools for customer service operations, backed by SQLite."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from google.adk.tools import ToolContext
@@ -174,7 +174,7 @@ async def search_orders(
         customer_id: The customer ID to search orders for (required).
         merchant_name: Partial or full merchant/store name (e.g., "TechMart"). Case-insensitive partial match.
         amount: Approximate order total (e.g., 80.0 for "about $80"). Matches within ±10%.
-        date: Order date in ISO format (e.g., "2026-02-15"). Omit if not known precisely.
+        date: Approximate order date in ISO format (e.g., "2026-02-15"). Matches within ±3 days.
     """
     # Build query with dynamic filters
     conditions = ["o.customer_id = ?"]
@@ -191,8 +191,17 @@ async def search_orders(
         params.extend([lower, upper])
 
     if date:
-        conditions.append("o.order_date = ?")
-        params.append(date)
+        # Approximate date match: ±3 days to handle imprecise user memory
+        try:
+            target = datetime.fromisoformat(date)
+            date_lower = (target - timedelta(days=3)).strftime("%Y-%m-%d")
+            date_upper = (target + timedelta(days=3)).strftime("%Y-%m-%d")
+            conditions.append("o.order_date BETWEEN ? AND ?")
+            params.extend([date_lower, date_upper])
+        except ValueError:
+            # If date parsing fails, try exact match as fallback
+            conditions.append("o.order_date = ?")
+            params.append(date)
 
     where_clause = " AND ".join(conditions)
     sql = f"""

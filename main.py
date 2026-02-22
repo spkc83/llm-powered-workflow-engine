@@ -135,7 +135,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             app_name="workflow_engine",
             user_id=request.user_id,
             session_id=session_id,
+            state={"customer_id": request.user_id},
         )
+
+    # Ensure customer_id is always available in session state
+    if not session.state.get("customer_id"):
+        session.state["customer_id"] = request.user_id
 
     # Build user message
     user_message = genai_types.Content(
