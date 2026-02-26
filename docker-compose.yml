@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  # --- Backend API ---
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=dev
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=text
+      - AUTH_ENABLED=false
+      - RATE_LIMIT_ENABLED=false
+      - DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+    volumes:
+      - ./data:/app/data
+      - ./procedures:/app/procedures
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- Chat UI ---
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["shiny", "run", "app_ui.py", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

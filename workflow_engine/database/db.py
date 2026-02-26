@@ -1,10 +1,24 @@
-"""SQLite database connection, schema creation, and query helpers."""
+"""SQLite database connection, schema creation, and query helpers.
+
+Provides connection pooling via a shared connection, configurable DB path
+via settings, and structured logging for all database operations.
+"""
 
 from pathlib import Path
+from typing import Optional
 
 import aiosqlite
 
+from ..logging_config import get_logger
+
+logger = get_logger("database")
+
+# Default path, overridden by settings at startup
 DB_PATH: Path = Path("data/workflow.db")
+
+# Connection pool (simple shared connection for SQLite; for PostgreSQL
+# in production, replace with SQLAlchemy async engine + session pool)
+_connection_pool: Optional[aiosqlite.Connection] = None
 
 _SCHEMA = """
 -- Customers
@@ -159,7 +173,62 @@ CREATE TABLE IF NOT EXISTS knowledge_articles (
     content TEXT,
     relevance_score REAL DEFAULT 0.0
 );
+
+-- Audit Trail (immutable compliance log)
+CREATE TABLE IF NOT EXISTS audit_trail (
+    entry_id TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    correlation_id TEXT,
+    session_id TEXT,
+    procedure_id TEXT,
+    step_id TEXT,
+    before_state TEXT,
+    after_state TEXT,
+    metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_trail_actor ON audit_trail(actor);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_action ON audit_trail(action);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_timestamp ON audit_trail(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_trail_session ON audit_trail(session_id);
 """
+
+
+def configure_db_path(path: Path) -> None:
+    """Override the default database path (called from settings at startup)."""
+    global DB_PATH
+    DB_PATH = path
+    logger.info("Database path configured: %s", DB_PATH)
+
+
+async def get_connection() -> aiosqlite.Connection:
+    """Get a shared database connection (simple pool for SQLite).
+
+    For production with PostgreSQL, replace this with SQLAlchemy
+    async session factory with proper connection pooling.
+    """
+    global _connection_pool
+    if _connection_pool is None:
+        _connection_pool = await aiosqlite.connect(DB_PATH)
+        _connection_pool.row_factory = aiosqlite.Row
+        # Enable WAL mode for better concurrent read performance
+        await _connection_pool.execute("PRAGMA journal_mode=WAL")
+        await _connection_pool.execute("PRAGMA foreign_keys=ON")
+        logger.info("Database connection pool initialized")
+    return _connection_pool
+
+
+async def close_connection() -> None:
+    """Close the shared database connection (call on shutdown)."""
+    global _connection_pool
+    if _connection_pool is not None:
+        await _connection_pool.close()
+        _connection_pool = None
+        logger.info("Database connection pool closed")
 
 
 async def init_db() -> Path:
@@ -168,11 +237,16 @@ async def init_db() -> Path:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_SCHEMA)
         await db.commit()
+    logger.info("Database initialized at %s", DB_PATH)
     return DB_PATH
 
 
 def get_db():
-    """Return an aiosqlite connection context manager."""
+    """Return an aiosqlite connection context manager.
+
+    Note: Prefer get_connection() for pooled access. This function
+    is kept for backward compatibility with existing code.
+    """
     return aiosqlite.connect(DB_PATH)
 
 
@@ -202,3 +276,19 @@ async def execute(sql: str, params: tuple = ()) -> int:
         async with db.execute(sql, params) as cursor:
             await db.commit()
             return cursor.lastrowid
+
+
+async def execute_in_transaction(statements: list[tuple[str, tuple]]) -> None:
+    """Execute multiple statements in a single transaction.
+
+    Args:
+        statements: List of (sql, params) tuples to execute atomically.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            for sql, params in statements:
+                await db.execute(sql, params)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise

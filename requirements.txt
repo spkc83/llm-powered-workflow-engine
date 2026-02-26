@@ -1,10 +1,27 @@
+# Core framework
 google-adk
-pyyaml
-python-dotenv
 fastapi
 uvicorn[standard]
+
+# Database
+aiosqlite
+
+# Configuration
+python-dotenv
+pydantic-settings
+
+# Authentication
+PyJWT
+
+# YAML procedures
+pyyaml
+
+# HTTP client (UI ↔ backend)
+httpx
+
+# Chat UI
+shiny
+
+# Testing
 pytest
 pytest-asyncio
-shiny
-aiosqlite
-httpx

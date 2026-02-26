@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.pytest_cache
+.omc
+.claude
+__pycache__
+*.pyc
+data/workflow.db
+*.md
+!README.md
+!docs/*.md
+tests/
+.dockerignore
+Dockerfile
+docker-compose*.yml
