@@ -312,7 +312,7 @@ The channel abstraction layer normalizes messages from different communication s
 
 ### Agent Guardrails
 
-Output filtering prevents agents from:
+Output filtering is wired into both the REST and WebSocket chat endpoints. Every agent response is passed through `filter_response()` before reaching the user. This prevents agents from:
 
 - Leaking internal data (step IDs, SQL queries, credentials)
 - Making unauthorized promises or guarantees
@@ -328,7 +328,8 @@ Tool argument validation catches:
 Tools are async Python functions that agents call during workflow execution. Each tool:
 
 1. Queries or mutates the database via the **repository layer**
-2. Stores relevant results in `tool_context.state` for use in later steps
+2. Logs compliance-critical actions to the **audit trail**
+3. Stores relevant results in `tool_context.state` for use in later steps
 3. Returns a dict that the agent interprets to continue the conversation
 
 ### Database
@@ -359,13 +360,16 @@ The API is versioned at `/api/v1`. Legacy routes at `/api/` are maintained for b
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/chat` | Send a message, get agent response |
-| `WS` | `/api/v1/ws/chat` | WebSocket for streaming responses |
-| `GET` | `/api/v1/customers` | List all customers |
+| `POST` | `/api/v1/chat` | Send a message, get agent response (guardrail-filtered) |
+| `WS` | `/api/v1/ws/chat` | WebSocket for streaming responses (guardrail-filtered) |
+| `GET` | `/api/v1/customers?limit=&offset=` | List customers (paginated) |
 | `GET` | `/api/v1/sessions?user_id=...` | List sessions for a user |
 | `GET` | `/api/v1/procedures` | List all loaded procedures |
+| `GET` | `/api/v1/procedures/active` | List active procedure executors with progress |
 | `GET` | `/api/v1/session/{id}/state?user_id=...` | Get workflow state |
-| `GET` | `/api/v1/tables/{name}` | Browse database table contents |
+| `GET` | `/api/v1/session/{id}/procedure` | Get procedure execution progress and step history |
+| `GET` | `/api/v1/tables/{name}?limit=&offset=` | Browse database table contents (paginated) |
+| `GET` | `/api/v1/metrics` | Operational metrics for monitoring dashboards |
 | `GET` | `/health` | Health check with version and status |
 
 See [docs/api.md](docs/api.md) for request/response schemas and examples.

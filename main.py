@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 # Load environment variables before any other imports
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -27,16 +27,19 @@ from google.adk.sessions import DatabaseSessionService
 from google.genai import types as genai_types
 
 from workflow_engine.agent import registry, root_agent
+from workflow_engine.agents.guardrails import filter_response
 from workflow_engine.audit.logger import init_audit_logger
+from workflow_engine.channels.base import ChannelType, OutboundMessage
 from workflow_engine.channels.http import HttpChannel, WebSocketChannel
 from workflow_engine.database import close_connection, init_db, query_all, seed_all
 from workflow_engine.database.repository import AuditRepository
 from workflow_engine.errors import NotFoundError, ValidationError, WorkflowEngineError
 from workflow_engine.logging_config import LogContext, get_logger, setup_logging
-from workflow_engine.middleware.auth import AuthMiddleware, get_current_user
+from workflow_engine.middleware.auth import AuthMiddleware
 from workflow_engine.middleware.correlation import CorrelationMiddleware
 from workflow_engine.middleware.error_handler import generic_error_handler, workflow_error_handler
 from workflow_engine.middleware.rate_limiter import RateLimiterMiddleware
+from workflow_engine.procedures.executor import ProcedureExecutorRegistry
 from workflow_engine.settings import get_settings
 
 # --- Initialize logging ---
@@ -148,6 +151,9 @@ runner = Runner(
     session_service=session_service,
 )
 
+# Procedure executor registry — tracks active procedure state machines per session
+executor_registry = ProcedureExecutorRegistry()
+
 
 # --- Pydantic models ---
 
@@ -216,39 +222,46 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
 
     If no session_id is provided, a new session is created.
     """
-    session_id = request.session_id or str(uuid.uuid4())
+    # Normalize inbound message via channel abstraction
+    inbound = await http_channel.receive({
+        "message": request.message,
+        "user_id": request.user_id,
+        "session_id": request.session_id,
+    })
 
-    with LogContext(session_id=session_id, user_id=request.user_id):
-        logger.info("Chat request from user=%s session=%s", request.user_id, session_id)
+    session_id = inbound.session_id or str(uuid.uuid4())
+
+    with LogContext(session_id=session_id, user_id=inbound.user_id):
+        logger.info("Chat request from user=%s session=%s", inbound.user_id, session_id)
 
         # Get or create session
         session = await session_service.get_session(
             app_name=settings.app_name,
-            user_id=request.user_id,
+            user_id=inbound.user_id,
             session_id=session_id,
         )
         if session is None:
             session = await session_service.create_session(
                 app_name=settings.app_name,
-                user_id=request.user_id,
+                user_id=inbound.user_id,
                 session_id=session_id,
-                state={"customer_id": request.user_id},
+                state={"customer_id": inbound.user_id},
             )
 
         # Ensure customer_id is always available in session state
         if not session.state.get("customer_id"):
-            session.state["customer_id"] = request.user_id
+            session.state["customer_id"] = inbound.user_id
 
         # Build user message
         user_message = genai_types.Content(
             role="user",
-            parts=[genai_types.Part(text=request.message)],
+            parts=[genai_types.Part(text=inbound.text)],
         )
 
         # Run agent and collect response text from sub-agents
         response_parts = []
         async for event in runner.run_async(
-            user_id=request.user_id,
+            user_id=inbound.user_id,
             session_id=session_id,
             new_message=user_message,
         ):
@@ -262,6 +275,16 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
                         response_parts.append(part.text)
 
         response_text = "\n\n".join(response_parts) if response_parts else ""
+
+        # Apply guardrails — filter internal data leakage from agent output
+        response_text, violations = filter_response(response_text)
+        if violations:
+            logger.warning(
+                "Guardrail violations filtered from response (session=%s): %s",
+                session_id,
+                [v.rule for v in violations],
+            )
+
         logger.info("Chat response generated (len=%d)", len(response_text))
 
         return ChatResponse(response=response_text, session_id=session_id)
@@ -305,10 +328,13 @@ async def get_session_state_v1(session_id: str, user_id: str) -> SessionStateRes
 
 
 @app.get(f"{settings.api_prefix}/customers", tags=["customers"])
-async def list_customers_v1() -> dict:
+async def list_customers_v1(limit: int = 100, offset: int = 0) -> dict:
     """Return all customers for the UI customer selector."""
-    rows = await query_all("SELECT customer_id, name FROM customers")
-    return {"customers": rows, "count": len(rows)}
+    rows = await query_all(
+        "SELECT customer_id, name FROM customers LIMIT ? OFFSET ?",
+        (limit, offset),
+    )
+    return {"customers": rows, "count": len(rows), "limit": limit, "offset": offset}
 
 
 @app.get(f"{settings.api_prefix}/sessions", tags=["sessions"])
@@ -330,7 +356,7 @@ async def list_sessions_v1(user_id: str) -> dict:
 
 
 @app.get(f"{settings.api_prefix}/tables/{{table_name}}", tags=["data"])
-async def get_table_data_v1(table_name: str) -> dict:
+async def get_table_data_v1(table_name: str, limit: int = 100, offset: int = 0) -> dict:
     """Get all rows from an allowed table for the data browser."""
     if table_name not in _ALLOWED_TABLES:
         raise ValidationError(
@@ -338,8 +364,11 @@ async def get_table_data_v1(table_name: str) -> dict:
             field="table_name",
             details={"allowed": sorted(_ALLOWED_TABLES)},
         )
-    rows = await query_all(f"SELECT * FROM {table_name}")  # noqa: S608 — table_name is allowlisted
-    return {"table": table_name, "rows": rows, "count": len(rows)}
+    rows = await query_all(
+        f"SELECT * FROM {table_name} LIMIT ? OFFSET ?",  # noqa: S608 — table_name is allowlisted
+        (limit, offset),
+    )
+    return {"table": table_name, "rows": rows, "count": len(rows), "limit": limit, "offset": offset}
 
 
 # --- WebSocket endpoint for streaming responses ---
@@ -395,12 +424,19 @@ async def websocket_chat(websocket: WebSocket):
                     ):
                         for part in event.content.parts:
                             if part.text:
-                                from workflow_engine.channels.base import OutboundMessage, ChannelType
+                                # Apply guardrails before sending to client
+                                filtered_text, violations = filter_response(part.text)
+                                if violations:
+                                    logger.warning(
+                                        "Guardrail violations filtered from WS stream (session=%s): %s",
+                                        session_id,
+                                        [v.rule for v in violations],
+                                    )
                                 msg = OutboundMessage(
                                     channel=ChannelType.WEBSOCKET,
                                     user_id=user_id,
                                     session_id=session_id,
-                                    text=part.text,
+                                    text=filtered_text,
                                 )
                                 frame = await ws_channel.format_response(msg)
                                 await websocket.send_json(frame)
@@ -413,6 +449,42 @@ async def websocket_chat(websocket: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket connection closed")
+
+
+@app.get(f"{settings.api_prefix}/procedures/active", tags=["procedures"])
+async def list_active_procedures_v1() -> dict:
+    """List all active procedure executors with their progress."""
+    active = executor_registry.list_active()
+    return {"active_procedures": active, "count": len(active)}
+
+
+@app.get(f"{settings.api_prefix}/session/{{session_id}}/procedure", tags=["procedures"])
+async def get_session_procedure_v1(session_id: str) -> dict:
+    """Get the procedure execution progress for a session."""
+    executor = executor_registry.get(session_id)
+    if executor is None:
+        return {"session_id": session_id, "procedure": None, "message": "No active procedure for this session."}
+    return {
+        "session_id": session_id,
+        "procedure": executor.get_progress(),
+        "step_history": executor.get_step_history(),
+    }
+
+
+# --- Metrics endpoint ---
+
+
+@app.get(f"{settings.api_prefix}/metrics", tags=["system"])
+async def metrics_v1() -> dict:
+    """Basic operational metrics for monitoring dashboards."""
+    active_procedures = executor_registry.list_active()
+    return {
+        "procedures_loaded": len(registry.procedures),
+        "active_procedures": len(active_procedures),
+        "auth_enabled": settings.auth_enabled,
+        "rate_limit_enabled": settings.rate_limit_enabled,
+        "environment": settings.environment.value,
+    }
 
 
 # ===========================================================================
