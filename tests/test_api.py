@@ -130,7 +130,9 @@ class TestSessionStateEndpoint:
             params={"user_id": "user-1"},
         )
         data = resp.json()
-        assert "detail" in data
+        # Structured error format: {"error": {"code": ..., "message": ...}}
+        assert "error" in data
+        assert "NOT_FOUND" in data["error"]["code"]
 
     @pytest.mark.asyncio
     async def test_existing_session_returns_200(self, client):

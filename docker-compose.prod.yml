@@ -1,0 +1,28 @@
+version: "3.9"
+
+# Production overlay — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - AUTH_ENABLED=true
+      - RATE_LIMIT_ENABLED=true
+      - RATE_LIMIT_REQUESTS=100
+      - RATE_LIMIT_WINDOW_SECONDS=60
+      # Override with real secret in production
+      # - AUTH_SECRET_KEY=your-production-secret
+      # For PostgreSQL in production:
+      # - DATABASE_URL=postgresql+asyncpg://user:pass@db:5432/workflow
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
