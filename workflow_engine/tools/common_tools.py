@@ -1,11 +1,23 @@
-"""Common tools shared across agent domains, backed by SQLite."""
+"""Common tools shared across agent domains.
+
+Uses the repository pattern for data access and the audit logger
+for compliance-critical actions (escalations, case notes).
+"""
 
 import uuid
 from datetime import datetime
 
 from google.adk.tools import ToolContext
 
-from workflow_engine.database.db import execute, query_all
+from workflow_engine.audit import AuditAction, get_audit_logger
+from workflow_engine.database.repository import (
+    CaseRepository,
+    EscalationRepository,
+    KnowledgeRepository,
+)
+from workflow_engine.logging_config import get_logger
+
+logger = get_logger("tools.common")
 
 
 async def escalate_to_supervisor(case_id: str, reason: str, priority: str, tool_context: ToolContext) -> dict:
@@ -20,12 +32,15 @@ async def escalate_to_supervisor(case_id: str, reason: str, priority: str, tool_
     escalation_id = f"ESC-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     estimated_response = "within 2 hours" if priority in ("high", "urgent") else "within 24 hours"
 
-    await execute(
-        """
-        INSERT INTO escalations (escalation_id, case_id, reason, priority, assigned_to, estimated_response, escalated_at, status)
-        VALUES (?, ?, ?, ?, 'Supervisor Martinez', ?, ?, 'escalated')
-        """,
-        (escalation_id, case_id, reason, priority, estimated_response, now),
+    logger.info("Escalating case %s: priority=%s reason=%s", case_id, priority, reason)
+
+    await EscalationRepository.create(
+        escalation_id=escalation_id,
+        case_id=case_id,
+        reason=reason,
+        priority=priority,
+        assigned_to="Supervisor Martinez",
+        estimated_response=estimated_response,
     )
 
     result = {
@@ -42,6 +57,22 @@ async def escalate_to_supervisor(case_id: str, reason: str, priority: str, tool_
     tool_context.state["escalation_data"] = result
     tool_context.state["workflow_status"] = "escalated"
 
+    # Audit — compliance-critical
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.ESCALATION_CREATED,
+        actor=tool_context.state.get("customer_id", "system"),
+        resource_type="escalation",
+        resource_id=escalation_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={
+            "case_id": case_id,
+            "priority": priority,
+            "reason": reason,
+            "assigned_to": "Supervisor Martinez",
+        },
+    )
+
     return result
 
 
@@ -55,10 +86,9 @@ async def add_case_note(case_id: str, note: str, tool_context: ToolContext) -> d
     now = datetime.now().isoformat()
     note_id = f"NOTE-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
-    await execute(
-        "INSERT INTO case_notes (note_id, case_id, note, created_at, created_by) VALUES (?, ?, ?, ?, 'system')",
-        (note_id, case_id, note, now),
-    )
+    logger.info("Adding note %s to case %s", note_id, case_id)
+
+    await CaseRepository.add_note(note_id=note_id, case_id=case_id, note=note)
 
     result = {
         "note_id": note_id,
@@ -72,6 +102,17 @@ async def add_case_note(case_id: str, note: str, tool_context: ToolContext) -> d
     existing_notes.append(result)
     tool_context.state["case_notes"] = existing_notes
 
+    # Audit
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.CASE_NOTE_ADDED,
+        actor=tool_context.state.get("customer_id", "system"),
+        resource_type="case_note",
+        resource_id=note_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={"case_id": case_id, "note_length": len(note)},
+    )
+
     return result
 
 
@@ -81,20 +122,8 @@ async def get_knowledge_article(query: str, tool_context: ToolContext) -> dict:
     Args:
         query: Search query for finding relevant knowledge articles.
     """
-    all_articles = await query_all(
-        "SELECT article_id, title, summary, relevance_score FROM knowledge_articles ORDER BY relevance_score DESC"
-    )
+    logger.info("Knowledge base search: %s", query)
 
-    query_lower = query.lower()
-    matched = []
-    for article in all_articles:
-        if any(
-            word in article["title"].lower() or word in article["summary"].lower()
-            for word in query_lower.split()
-        ):
-            matched.append(article)
-
-    if not matched:
-        matched = all_articles[:2]
+    matched = await KnowledgeRepository.search(query)
 
     return {"query": query, "articles": matched, "total_results": len(matched)}

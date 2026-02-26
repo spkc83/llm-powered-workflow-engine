@@ -1,12 +1,12 @@
 # API Reference
 
-The FastAPI backend runs on port 8000 by default. All endpoints are async.
+The FastAPI backend runs on port 8000 by default. All endpoints are async and versioned at `/api/v1`. Legacy routes at `/api/` are maintained for backward compatibility.
 
 ## Endpoints
 
-### POST /api/chat
+### POST /api/v1/chat
 
-Send a user message and receive an agent response.
+Send a user message and receive an agent response. The response is filtered through guardrails to prevent leakage of internal data.
 
 **Request body:**
 
@@ -20,8 +20,8 @@ Send a user message and receive an agent response.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `message` | string | yes | The user's message |
-| `user_id` | string | yes | Identifier for the user |
+| `message` | string | yes | The user's message (1–10,000 characters) |
+| `user_id` | string | yes | Identifier for the user (1–100 characters) |
 | `session_id` | string | no | Existing session ID to continue a conversation. If omitted, a new session is created. |
 
 **Response (200):**
@@ -35,19 +35,60 @@ Send a user message and receive an agent response.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `response` | string | The agent's response text |
+| `response` | string | The agent's response text (guardrail-filtered) |
 | `session_id` | string | Session ID (save this to continue the conversation) |
 
 **How it works:**
 
-1. Gets or creates a session via `DatabaseSessionService`
-2. Sends the message to the ADK runner which routes it to the appropriate agent
-3. The agent follows its procedure, calling tools as needed
-4. The final response text is collected and returned
+1. Normalizes the request via the HTTP channel adapter
+2. Gets or creates a session via `DatabaseSessionService`
+3. Sends the message to the ADK runner which routes it to the appropriate agent
+4. The agent follows its procedure, calling tools as needed
+5. The response is passed through `filter_response()` guardrails
+6. The filtered response text is returned
 
 ---
 
-### GET /api/procedures
+### WS /api/v1/ws/chat
+
+WebSocket endpoint for real-time streaming agent responses. Each response chunk is guardrail-filtered before sending.
+
+**Inbound message:**
+
+```json
+{
+  "message": "I'd like a refund for order ORD-123",
+  "user_id": "CUST-456",
+  "session_id": "optional-session-id"
+}
+```
+
+**Outbound frames:**
+
+```json
+{
+  "type": "agent_response",
+  "text": "Let me look up that order...",
+  "session_id": "a1b2c3d4-...",
+  "timestamp": "2026-02-25T10:30:00+00:00",
+  "quick_replies": [],
+  "cards": [],
+  "metadata": {}
+}
+```
+
+**Completion marker:**
+
+```json
+{
+  "type": "stream_end",
+  "session_id": "a1b2c3d4-..."
+}
+```
+
+---
+
+### GET /api/v1/procedures
 
 List all loaded workflow procedures.
 
@@ -61,26 +102,41 @@ List all loaded workflow procedures.
       "name": "Customer Service - Refund Request",
       "description": "Handle customer refund requests for orders",
       "trigger_intents": ["refund", "return", "money back", "cancel order"]
-    },
-    {
-      "id": "cs_complaint",
-      "name": "Customer Service - Complaint Handling",
-      "description": "Handle customer complaints about products, services, or orders",
-      "trigger_intents": ["complaint", "unhappy", "dissatisfied", "problem with", "issue with", "bad experience"]
-    },
-    {
-      "id": "fraud_alert_triage",
-      "name": "Fraud Operations - Alert Triage",
-      "description": "Triage and investigate fraud alerts, gather evidence, and take appropriate action",
-      "trigger_intents": ["fraud alert", "suspicious activity", "fraud investigation", "alert triage", "suspicious transaction"]
     }
-  ]
+  ],
+  "count": 3
 }
 ```
 
 ---
 
-### GET /api/session/{session_id}/state
+### GET /api/v1/procedures/active
+
+List all active procedure executors with their progress.
+
+**Response (200):**
+
+```json
+{
+  "active_procedures": {
+    "session-id-1": {
+      "procedure_id": "cs_refund",
+      "procedure_name": "Customer Service - Refund Request",
+      "status": "in_progress",
+      "current_step": "check_eligibility",
+      "steps_completed": ["greet_and_collect", "lookup_order"],
+      "total_steps": 7,
+      "started_at": "2026-02-25T10:30:00+00:00",
+      "completed_at": null
+    }
+  },
+  "count": 1
+}
+```
+
+---
+
+### GET /api/v1/session/{session_id}/state
 
 Get workflow state for a session.
 
@@ -112,15 +168,69 @@ Only workflow-related state keys are exposed (not internal agent state).
 
 ```json
 {
-  "detail": "Session 'nonexistent-id' not found"
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Session 'nonexistent-id' not found",
+    "status_code": 404
+  }
 }
 ```
 
 ---
 
-### GET /api/customers
+### GET /api/v1/session/{session_id}/procedure
 
-List all customers. Used by the Shiny UI customer selector.
+Get the procedure execution progress and step history for a session.
+
+**Response (200) — active procedure:**
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "procedure": {
+    "procedure_id": "cs_refund",
+    "procedure_name": "Customer Service - Refund Request",
+    "status": "in_progress",
+    "current_step": "check_eligibility",
+    "steps_completed": ["greet_and_collect", "lookup_order"],
+    "total_steps": 7,
+    "started_at": "2026-02-25T10:30:00+00:00",
+    "completed_at": null
+  },
+  "step_history": [
+    {
+      "step_id": "greet_and_collect",
+      "status": "completed",
+      "entered_at": "2026-02-25T10:30:00+00:00",
+      "completed_at": "2026-02-25T10:30:15+00:00",
+      "transition_reason": "completed"
+    }
+  ]
+}
+```
+
+**Response (200) — no active procedure:**
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "procedure": null,
+  "message": "No active procedure for this session."
+}
+```
+
+---
+
+### GET /api/v1/customers
+
+List all customers. Supports pagination.
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 100 | Maximum number of rows to return |
+| `offset` | int | 0 | Number of rows to skip |
 
 **Response (200):**
 
@@ -130,24 +240,19 @@ List all customers. Used by the Shiny UI customer selector.
     {
       "customer_id": "CUST-456",
       "name": "Jane Smith"
-    },
-    {
-      "customer_id": "CUST-789",
-      "name": "Bob Johnson"
     }
-  ]
+  ],
+  "count": 4,
+  "limit": 100,
+  "offset": 0
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `customers` | array | List of objects with `customer_id` and `name` |
-
 ---
 
-### GET /api/sessions
+### GET /api/v1/sessions
 
-List all sessions for a user. Used by the Shiny UI session history to allow switching between conversations.
+List all sessions for a user.
 
 **Query parameters:**
 
@@ -164,34 +269,30 @@ List all sessions for a user. Used by the Shiny UI session history to allow swit
       "session_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "procedure": "Customer Service - Refund Request",
       "status": "completed"
-    },
-    {
-      "session_id": "f1e2d3c4-b5a6-7890-fedc-ba0987654321",
-      "procedure": "",
-      "status": ""
     }
-  ]
+  ],
+  "count": 1
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `sessions` | array | List of session objects |
-| `sessions[].session_id` | string | The session ID |
-| `sessions[].procedure` | string | Name of the active/completed procedure (empty if none) |
-| `sessions[].status` | string | Workflow status: `in_progress`, `completed`, `escalated`, or empty |
-
 ---
 
-### GET /api/tables/{table_name}
+### GET /api/v1/tables/{table_name}
 
-Browse the contents of a database table. Used by the Shiny data browser.
+Browse the contents of a database table. Supports pagination.
 
 **Path parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `table_name` | string | Name of the table to query |
+
+**Query parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 100 | Maximum number of rows to return |
+| `offset` | int | 0 | Number of rows to skip |
 
 **Allowed tables:**
 
@@ -206,23 +307,44 @@ Browse the contents of a database table. Used by the Shiny data browser.
     {
       "customer_id": "CUST-456",
       "name": "Jane Smith",
-      "email": "jane.smith@email.com",
-      "phone": "+1-555-0123",
-      "account_status": "active",
-      "loyalty_tier": "gold",
-      "total_orders": 15,
-      "member_since": "2022-03-15"
+      "email": "jane.smith@email.com"
     }
   ],
-  "count": 4
+  "count": 4,
+  "limit": 100,
+  "offset": 0
 }
 ```
 
-**Response (400):**
+**Response (422):**
 
 ```json
 {
-  "detail": "Table 'secret_table' is not allowed"
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Table 'secret_table' is not browsable",
+    "status_code": 422,
+    "field": "table_name",
+    "details": {"allowed": ["accounts", "cases", "..."]}
+  }
+}
+```
+
+---
+
+### GET /api/v1/metrics
+
+Operational metrics for monitoring dashboards.
+
+**Response (200):**
+
+```json
+{
+  "procedures_loaded": 3,
+  "active_procedures": 1,
+  "auth_enabled": false,
+  "rate_limit_enabled": false,
+  "environment": "dev"
 }
 ```
 
@@ -237,28 +359,64 @@ Health check.
 ```json
 {
   "status": "ok",
-  "procedures_loaded": 3
+  "version": "1.0.0",
+  "environment": "dev",
+  "procedures_loaded": 3,
+  "auth_enabled": false
 }
 ```
+
+## Error Responses
+
+All errors follow a structured format:
+
+```json
+{
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Human-readable error description",
+    "status_code": 404
+  }
+}
+```
+
+| Error Code | Status | Description |
+|------------|--------|-------------|
+| `NOT_FOUND` | 404 | Resource not found |
+| `VALIDATION_ERROR` | 422 | Invalid input |
+| `AUTHENTICATION_ERROR` | 401 | Missing or invalid token |
+| `AUTHORIZATION_ERROR` | 403 | Insufficient permissions |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |
+| `TOOL_EXECUTION_ERROR` | 500 | Tool failed during execution |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
 
 ## Example Chat Flow
 
 ```bash
 # Start a refund conversation (natural language — no order ID needed)
-curl -X POST http://localhost:8000/api/chat \
+curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "I bought headphones from TechMart last week and I want a refund", "user_id": "CUST-456"}'
 
 # Or use an explicit order ID
-curl -X POST http://localhost:8000/api/chat \
+curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "I want a refund for order ORD-123", "user_id": "CUST-456"}'
 
 # Continue the conversation using the returned session_id
-curl -X POST http://localhost:8000/api/chat \
+curl -X POST http://localhost:8000/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Yes, the item was defective", "user_id": "CUST-456", "session_id": "<session_id>"}'
 
 # Check workflow progress
-curl "http://localhost:8000/api/session/<session_id>/state?user_id=CUST-456"
+curl "http://localhost:8000/api/v1/session/<session_id>/state?user_id=CUST-456"
+
+# Check procedure execution details
+curl "http://localhost:8000/api/v1/session/<session_id>/procedure"
+
+# Browse paginated data
+curl "http://localhost:8000/api/v1/customers?limit=10&offset=0"
+
+# View operational metrics
+curl "http://localhost:8000/api/v1/metrics"
 ```

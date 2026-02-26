@@ -1,11 +1,23 @@
-"""CRM tools for customer service operations, backed by SQLite."""
+"""CRM tools for customer service operations.
 
-from datetime import datetime, timedelta
+Uses the repository pattern for data access and the audit logger
+for compliance-critical actions.
+"""
+
+from datetime import datetime
 from typing import Optional
 
 from google.adk.tools import ToolContext
 
-from workflow_engine.database.db import execute, query_all, query_one
+from workflow_engine.audit import AuditAction, get_audit_logger
+from workflow_engine.database.repository import (
+    CustomerRepository,
+    OrderRepository,
+    RefundRepository,
+)
+from workflow_engine.logging_config import get_logger
+
+logger = get_logger("tools.crm")
 
 
 async def lookup_order(order_id: str, tool_context: ToolContext) -> dict:
@@ -14,24 +26,15 @@ async def lookup_order(order_id: str, tool_context: ToolContext) -> dict:
     Args:
         order_id: The order ID to look up (e.g., "ORD-123").
     """
-    order = await query_one(
-        """
-        SELECT o.*, c.name AS customer_name, c.email
-        FROM orders o
-        JOIN customers c ON o.customer_id = c.customer_id
-        WHERE o.order_id = ?
-        """,
-        (order_id,),
-    )
+    logger.info("Looking up order: %s", order_id)
+
+    order = await OrderRepository.get_by_id(order_id)
     if order is None:
         return {"error": f"Order {order_id} not found", "found": False}
 
-    items = await query_all(
-        "SELECT name, sku, qty, price FROM order_items WHERE order_id = ?",
-        (order_id,),
-    )
+    items = await OrderRepository.get_items(order_id)
 
-    # Compute days_since_delivery dynamically so it stays accurate
+    # Compute days_since_delivery dynamically
     days_since_delivery = order["days_since_delivery"] or 0
     if order["delivery_date"]:
         try:
@@ -60,6 +63,17 @@ async def lookup_order(order_id: str, tool_context: ToolContext) -> dict:
     tool_context.state["order_data"] = result
     tool_context.state["customer_id"] = order["customer_id"]
 
+    # Audit
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.ORDER_LOOKUP,
+        actor=tool_context.state.get("customer_id", "system"),
+        resource_type="order",
+        resource_id=order_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={"status": order["status"], "total": order["total"]},
+    )
+
     return result
 
 
@@ -69,10 +83,9 @@ async def get_customer_profile(customer_id: str, tool_context: ToolContext) -> d
     Args:
         customer_id: The customer ID to look up (e.g., "CUST-456").
     """
-    profile = await query_one(
-        "SELECT * FROM customers WHERE customer_id = ?",
-        (customer_id,),
-    )
+    logger.info("Looking up customer: %s", customer_id)
+
+    profile = await CustomerRepository.get_by_id(customer_id)
     if profile is None:
         return {"error": f"Customer {customer_id} not found", "found": False}
 
@@ -95,12 +108,15 @@ async def issue_refund(order_id: str, reason: str, tool_context: ToolContext) ->
     refund_id = f"REF-{order_id.split('-')[1]}-{datetime.now().strftime('%H%M%S')}"
     processed_at = datetime.now().isoformat()
 
-    await execute(
-        """
-        INSERT INTO refunds (refund_id, order_id, amount, currency, status, reason, refund_method, estimated_days, processed_at)
-        VALUES (?, ?, ?, 'USD', 'processed', ?, ?, '5-7 business days', ?)
-        """,
-        (refund_id, order_id, amount, reason, payment_method, processed_at),
+    logger.info("Issuing refund %s for order %s (amount=%.2f)", refund_id, order_id, amount)
+
+    await RefundRepository.create(
+        refund_id=refund_id,
+        order_id=order_id,
+        amount=amount,
+        reason=reason,
+        refund_method=payment_method,
+        processed_at=processed_at,
     )
 
     result = {
@@ -118,6 +134,23 @@ async def issue_refund(order_id: str, reason: str, tool_context: ToolContext) ->
     tool_context.state["refund_data"] = result
     tool_context.state["workflow_status"] = "refund_processed"
 
+    # Audit — compliance-critical
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.REFUND_ISSUED,
+        actor=tool_context.state.get("customer_id", "system"),
+        resource_type="refund",
+        resource_id=refund_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={
+            "order_id": order_id,
+            "amount": amount,
+            "currency": "USD",
+            "reason": reason,
+            "refund_method": payment_method,
+        },
+    )
+
     return result
 
 
@@ -129,20 +162,18 @@ async def update_case_status(case_id: str, status: str, notes: str, tool_context
         status: New status (e.g., "resolved", "closed", "escalated").
         notes: Notes about the status update.
     """
+    from workflow_engine.database.repository import CaseRepository
+
+    logger.info("Updating case %s to status=%s", case_id, status)
+
+    await CaseRepository.upsert(
+        case_id=case_id,
+        status=status,
+        notes=notes,
+        customer_id=tool_context.state.get("customer_id"),
+    )
+
     now = datetime.now().isoformat()
-
-    existing = await query_one("SELECT case_id FROM cases WHERE case_id = ?", (case_id,))
-    if existing:
-        await execute(
-            "UPDATE cases SET status = ?, notes = ?, updated_at = ? WHERE case_id = ?",
-            (status, notes, now, case_id),
-        )
-    else:
-        await execute(
-            "INSERT INTO cases (case_id, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (case_id, status, notes, now, now),
-        )
-
     result = {
         "case_id": case_id,
         "status": status,
@@ -153,6 +184,18 @@ async def update_case_status(case_id: str, status: str, notes: str, tool_context
 
     tool_context.state["case_status"] = status
     tool_context.state["workflow_status"] = status
+
+    # Audit
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.CASE_UPDATED,
+        actor=tool_context.state.get("customer_id", "system"),
+        resource_type="case",
+        resource_id=case_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        after_state={"status": status},
+        metadata={"notes": notes},
+    )
 
     return result
 
@@ -176,44 +219,33 @@ async def search_orders(
         amount: Approximate order total (e.g., 80.0 for "about $80"). Matches within ±10%.
         date: Approximate order date in ISO format (e.g., "2026-02-15"). Matches within ±3 days.
     """
-    # Build query with dynamic filters
-    conditions = ["o.customer_id = ?"]
-    params: list = [customer_id]
+    logger.info(
+        "Searching orders for customer=%s merchant=%s amount=%s date=%s",
+        customer_id, merchant_name, amount, date,
+    )
 
-    if merchant_name:
-        conditions.append("o.merchant_name LIKE ?")
-        params.append(f"%{merchant_name}%")
+    rows = await OrderRepository.search(
+        customer_id=customer_id,
+        merchant_name=merchant_name,
+        amount=amount,
+        date=date,
+    )
 
-    if amount is not None and amount > 0:
-        lower = amount * 0.9
-        upper = amount * 1.1
-        conditions.append("o.total BETWEEN ? AND ?")
-        params.extend([lower, upper])
-
-    if date:
-        # Approximate date match: ±3 days to handle imprecise user memory
-        try:
-            target = datetime.fromisoformat(date)
-            date_lower = (target - timedelta(days=3)).strftime("%Y-%m-%d")
-            date_upper = (target + timedelta(days=3)).strftime("%Y-%m-%d")
-            conditions.append("o.order_date BETWEEN ? AND ?")
-            params.extend([date_lower, date_upper])
-        except ValueError:
-            # If date parsing fails, try exact match as fallback
-            conditions.append("o.order_date = ?")
-            params.append(date)
-
-    where_clause = " AND ".join(conditions)
-    sql = f"""
-        SELECT o.order_id, o.merchant_name, o.total, o.status, o.order_date,
-               o.delivery_date, o.days_since_delivery, o.payment_method,
-               o.shipping_address, o.customer_id
-        FROM orders o
-        WHERE {where_clause}
-        ORDER BY o.order_date DESC
-    """
-
-    rows = await query_all(sql, tuple(params))
+    # Audit
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.ORDER_SEARCH,
+        actor=customer_id,
+        resource_type="order",
+        resource_id=f"search:{customer_id}",
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={
+            "merchant_name": merchant_name,
+            "amount": amount,
+            "date": date,
+            "results_count": len(rows),
+        },
+    )
 
     if not rows:
         return {"matches": [], "count": 0, "message": "No orders found matching that description."}
@@ -221,10 +253,7 @@ async def search_orders(
     # Enrich each match with item summaries
     matches = []
     for row in rows:
-        items = await query_all(
-            "SELECT name, qty, price FROM order_items WHERE order_id = ?",
-            (row["order_id"],),
-        )
+        items = await OrderRepository.get_items(row["order_id"])
         items_summary = ", ".join(f"{it['name']} (x{it['qty']})" for it in items) if items else "no items"
 
         # Compute days_since_delivery dynamically
@@ -252,19 +281,8 @@ async def search_orders(
     # If exactly one match, populate state like lookup_order does
     if len(matches) == 1:
         match = matches[0]
-        order = await query_one(
-            """
-            SELECT o.*, c.name AS customer_name, c.email
-            FROM orders o
-            JOIN customers c ON o.customer_id = c.customer_id
-            WHERE o.order_id = ?
-            """,
-            (match["order_id"],),
-        )
-        items = await query_all(
-            "SELECT name, sku, qty, price FROM order_items WHERE order_id = ?",
-            (match["order_id"],),
-        )
+        order = await OrderRepository.get_by_id(match["order_id"])
+        items = await OrderRepository.get_items(match["order_id"])
         order_data = {
             "order_id": order["order_id"],
             "customer_name": order["customer_name"],
