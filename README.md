@@ -44,10 +44,12 @@ Agents follow YAML-defined step-by-step procedures while maintaining natural con
 
 ```
 router_agent (configurable — default: Gemini 2.5 Flash)
-├── customer_service_agent — orders, refunds, returns, complaints
+├── customer_service_agent — orders, refunds, returns, complaints, EFT disputes
 │   └── Tools: lookup_order, search_orders, get_customer_profile,
 │             issue_refund, update_case_status, escalate_to_supervisor,
-│             add_case_note, get_knowledge_article
+│             add_case_note, get_knowledge_article,
+│             lookup_dispute, check_dispute_eligibility,
+│             file_eft_dispute, issue_provisional_credit
 ├── fraud_ops_agent — alert triage, investigation, account actions
 │   └── Tools: get_fraud_alert, get_account_transactions,
 │             check_device_fingerprint, flag_account,
@@ -151,7 +153,8 @@ pytest tests/ -v
 ├── procedures/                     # YAML workflow definitions
 │   ├── customer_service_refund.yaml
 │   ├── customer_service_complaint.yaml
-│   └── fraud_ops_alert_triage.yaml
+│   ├── fraud_ops_alert_triage.yaml
+│   └── cs_eft_dispute.yaml         # Reg E EFT dispute resolution
 │
 ├── workflow_engine/                # Core engine package
 │   ├── settings.py                 # Centralized config (Pydantic BaseSettings)
@@ -164,7 +167,9 @@ pytest tests/ -v
 │   │   ├── router.py               # Router agent + general agent
 │   │   ├── customer_service.py     # Customer service agent factory
 │   │   ├── fraud_ops.py            # Fraud operations agent factory
-│   │   └── guardrails.py           # Output filtering, tool arg validation
+│   │   ├── guardrails.py           # Output filtering, tool arg validation, behavior steering
+│   │   ├── reasoning.py           # Z3/SymPy automated reasoning engine
+│   │   └── compliance.py          # Domain-specific compliance checks (Reg E, financial)
 │   │
 │   ├── auth/                       # Authentication & authorization
 │   │   ├── models.py               # Role, Permission, UserContext models
@@ -187,7 +192,8 @@ pytest tests/ -v
 │   ├── tools/                      # Tool implementations (async, SQLite-backed)
 │   │   ├── crm_tools.py            # lookup_order, search_orders, get_customer_profile, issue_refund, update_case_status
 │   │   ├── fraud_tools.py          # get_fraud_alert, get_account_transactions, check_device_fingerprint, flag_account, submit_sar, close_alert
-│   │   └── common_tools.py         # escalate_to_supervisor, add_case_note, get_knowledge_article
+│   │   ├── common_tools.py         # escalate_to_supervisor, add_case_note, get_knowledge_article
+│   │   └── dispute_tools.py        # lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
 │   │
 │   ├── database/                   # Persistence layer
 │   │   ├── __main__.py             # Standalone DB init: python -m workflow_engine.database [--reset]
@@ -211,7 +217,7 @@ pytest tests/ -v
 │   ├── database.md                 # Schema reference
 │   └── procedures.md               # Procedure authoring guide
 │
-└── tests/                          # Test suite (281 tests)
+└── tests/                          # Test suite (352+ tests)
     ├── test_database.py            # DB init, seed, query helpers
     ├── test_mock_tools.py          # All tool functions (async, uses temp DB)
     ├── test_workflow_state.py      # State tracking logic
@@ -224,9 +230,11 @@ pytest tests/ -v
     ├── test_settings.py            # Configuration validation
     ├── test_errors.py              # Error hierarchy
     ├── test_auth.py                # JWT, RBAC, permissions
-    ├── test_guardrails.py          # Output filtering, tool arg validation
+    ├── test_guardrails.py          # Output filtering, tool arg validation, steering pipeline
     ├── test_channels.py            # Channel abstraction, HTTP/WS adapters
-    └── test_audit.py               # Audit trail logging
+    ├── test_audit.py               # Audit trail logging
+    ├── test_reasoning.py           # Z3/SymPy automated reasoning engine
+    └── test_reg_e_compliance.py    # Reg E compliance checks, dispute tools, disclosures
 ```
 
 ## Configuration
@@ -248,6 +256,9 @@ See `.env.example` for the complete reference. Key settings:
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `LOG_FORMAT` | Log format (`text` or `json`) | `text` (dev) / `json` (prod) |
 | `CORS_ORIGINS` | Allowed CORS origins | `["http://localhost:8001"]` |
+| `REASONING_ENABLED` | Enable Z3/SymPy automated reasoning verification | `true` |
+| `REASONING_MAX_ITERATIONS` | Max behavior steering rewrite iterations | `2` |
+| `COMPLIANCE_ENABLED` | Enable domain-specific compliance checks | `true` |
 
 ## Key Concepts
 
@@ -310,18 +321,95 @@ The channel abstraction layer normalizes messages from different communication s
 - **WebSocket** — real-time streaming responses
 - **Extensible** — add SMS, email, WhatsApp, IVR adapters by implementing the `Channel` interface
 
-### Agent Guardrails
+### Agent Guardrails & Automated Reasoning
 
-Output filtering is wired into both the REST and WebSocket chat endpoints. Every agent response is passed through `filter_response()` before reaching the user. This prevents agents from:
+The guardrails system uses a **4-layer pipeline** that combines fast pattern matching with formal logic verification:
 
+```
+LLM Response
+    │
+    ▼
+Layer 1: Pattern Rails (regex — fast first pass)
+    → Redact internal data, flag unauthorized promises
+    │
+Layer 2: Reasoning Rails (Z3 SMT solver)
+    → Verify LLM claims against formal procedure rules
+    │
+Layer 3: Compliance Rails (SymPy + domain rules)
+    → Financial math verification, required disclosures, Reg E checks
+    │
+Layer 4: Behavior Steering (rewrite loop)
+    → If INVALID: re-invoke LLM with feedback, re-verify (max 2 iterations)
+    → If still invalid: return safe fallback response
+    │
+    ▼
+Verified Response → Client
+```
+
+**Pattern Rails** (Layer 1) — existing regex-based checks that prevent agents from:
 - Leaking internal data (step IDs, SQL queries, credentials)
 - Making unauthorized promises or guarantees
 - Providing unauthorized financial/legal advice
 
-Tool argument validation catches:
+**Reasoning Rails** (Layer 2) — Z3 SMT solver verifies LLM claims deterministically:
+- Extracts claims from LLM text (dollar amounts, day counts, approval/denial decisions)
+- Converts YAML procedure conditions into Z3 formal logic constraints
+- Verifies claims are **mathematically consistent** with business rules
+- Returns VALID / INVALID / SATISFIABLE verdicts with cited rules
 
+**Compliance Rails** (Layer 3) — domain-specific verification:
+- **Financial accuracy** — SymPy verifies refund amounts, provisional credits, tax calculations
+- **Required disclosures** — checks that mandated information is present per procedure step
+- **Reg E compliance** — liability tier validation, investigation timeline accuracy, provisional credit math
+- **Prohibited content** — blocks investment advice, legal advice, competitor referrals
+
+**Behavior Steering** (Layer 4) — self-correcting pipeline:
+- If verification fails, constructs a rewrite prompt with specific feedback
+- Re-invokes the LLM with the violation details and rewrite hints
+- Re-verifies the corrected response (up to 2 iterations)
+- Falls back to a safe response if correction fails
+
+Tool argument validation catches:
 - Negative amounts, malformed IDs
 - Oversized inputs (prompt injection prevention)
+
+Configuration in `.env`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REASONING_ENABLED` | Enable Z3/SymPy reasoning verification | `true` |
+| `REASONING_MAX_ITERATIONS` | Max rewrite iterations for behavior steering | `2` |
+| `COMPLIANCE_ENABLED` | Enable domain compliance checks | `true` |
+
+### Regulation E (EFT Dispute) Compliance
+
+The engine includes a complete **Regulation E** implementation for electronic fund transfer disputes, demonstrating the automated reasoning system in a real compliance scenario.
+
+**Reg E Key Rules Enforced:**
+
+| Rule | Enforcement |
+|------|-------------|
+| Consumer liability: $50 (2 days), $500 (60 days), unlimited (60+ days) | Z3 constraint verification + SymPy math |
+| Investigation: 10 business days initial, 45/90 calendar days final | Required disclosure checks per step |
+| Provisional credit required if investigation > 10 business days | SymPy: `credit = disputed_amount - max_liability` |
+| Written acknowledgment within 1 business day | Disclosure pattern matching at `file_dispute` step |
+| Internal tier system must not be exposed to customer | Pattern detection for "tier 1", "tier 2", etc. |
+
+**Test Scenarios (pre-seeded for UI testing):**
+
+| Dispute ID | Customer | Tier | Scenario |
+|-----------|----------|------|----------|
+| DISP-001 | CUST-456 | Tier 1 ($50 max) | Unauthorized debit card, reported within 2 days |
+| DISP-002 | CUST-789 | Tier 2 ($500 max) | Unauthorized ACH, reported at 15 days |
+| DISP-003 | CUST-012 | Tier 3 (unlimited) | Unauthorized debit, reported at 75 days (outside window) |
+| DISP-004 | CUST-345 | Tier 1 ($50 max) | Error dispute — wrong amount charged |
+
+**Try it from the UI:**
+1. Start the backend and Shiny UI
+2. Select customer CUST-456 from the customer selector
+3. Type: "I want to dispute an unauthorized charge on my debit card"
+4. The agent follows the `cs_eft_dispute` procedure through eligibility assessment, filing, and provisional credit
+5. Check the Data Browser tab → `disputes` table to see the created dispute record
 
 ### Tools
 

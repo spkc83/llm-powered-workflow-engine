@@ -73,10 +73,10 @@ class TestProceduresEndpoint:
         assert isinstance(data["procedures"], list)
 
     @pytest.mark.asyncio
-    async def test_returns_all_three_procedures(self, client):
+    async def test_returns_all_four_procedures(self, client):
         resp = await client.get("/api/procedures")
         data = resp.json()
-        assert len(data["procedures"]) == 3
+        assert len(data["procedures"]) == 4  # 3 original + cs_eft_dispute
 
     @pytest.mark.asyncio
     async def test_each_procedure_has_required_fields(self, client):

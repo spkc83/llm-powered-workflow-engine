@@ -165,6 +165,37 @@ CREATE TABLE IF NOT EXISTS refunds (
     processed_at TEXT NOT NULL
 );
 
+-- EFT Disputes (Reg E compliance)
+CREATE TABLE IF NOT EXISTS disputes (
+    dispute_id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL REFERENCES customers(customer_id),
+    transaction_id TEXT NOT NULL,
+    account_id TEXT,
+    dispute_type TEXT NOT NULL,        -- unauthorized, error, fraud
+    amount REAL NOT NULL,
+    merchant TEXT NOT NULL,
+    transaction_date TEXT NOT NULL,
+    reported_date TEXT NOT NULL,
+    statement_date TEXT,               -- date of statement showing the transaction
+    days_since_transaction INTEGER,
+    days_since_statement INTEGER,
+    liability_tier TEXT,               -- tier_1 ($50), tier_2 ($500), tier_3 (unlimited)
+    max_liability REAL,
+    status TEXT DEFAULT 'open',        -- open, investigating, provisional_credit, resolved, denied
+    provisional_credit_issued INTEGER DEFAULT 0,
+    provisional_credit_date TEXT,
+    provisional_credit_amount REAL,
+    resolution TEXT,                   -- refunded, denied, partial
+    resolution_date TEXT,
+    resolution_reason TEXT,
+    investigation_deadline TEXT,        -- 10 business days initial, 45/90 calendar days final
+    payment_method TEXT,               -- debit_card, ach, wire, p2p
+    metadata TEXT                      -- JSON for additional context
+);
+
+CREATE INDEX IF NOT EXISTS idx_disputes_customer ON disputes(customer_id);
+CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status);
+
 -- Knowledge Articles
 CREATE TABLE IF NOT EXISTS knowledge_articles (
     article_id TEXT PRIMARY KEY,

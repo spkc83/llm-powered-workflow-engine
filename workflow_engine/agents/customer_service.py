@@ -6,6 +6,7 @@ from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
 from ..tools.crm_tools import lookup_order, get_customer_profile, issue_refund, update_case_status, search_orders
 from ..tools.common_tools import escalate_to_supervisor, add_case_note, get_knowledge_article
+from ..tools.dispute_tools import lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
 
 
 CS_PERSONA = """You are a friendly, empathetic, and professional customer service agent.
@@ -66,6 +67,11 @@ TOOL_MAP = {
     "escalate_to_supervisor": escalate_to_supervisor,
     "add_case_note": add_case_note,
     "get_knowledge_article": get_knowledge_article,
+    # Reg E dispute tools
+    "lookup_dispute": lookup_dispute,
+    "check_dispute_eligibility": check_dispute_eligibility,
+    "file_eft_dispute": file_eft_dispute,
+    "issue_provisional_credit": issue_provisional_credit,
     # issue_store_credit is referenced in YAML but not implemented;
     # the agent will use issue_refund or escalate as alternatives
 }

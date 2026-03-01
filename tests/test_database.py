@@ -101,7 +101,7 @@ class TestSeedAll:
         await init_db()
         await seed_all()
         rows = await query_all("SELECT * FROM transactions")
-        assert len(rows) == 11
+        assert len(rows) == 15  # 11 original + 4 EFT dispute transactions
 
     @pytest.mark.asyncio
     async def test_seeds_fraud_alerts(self):
@@ -122,7 +122,7 @@ class TestSeedAll:
         await init_db()
         await seed_all()
         rows = await query_all("SELECT * FROM knowledge_articles")
-        assert len(rows) == 4
+        assert len(rows) == 5  # 4 original + 1 Reg E article
 
     @pytest.mark.asyncio
     async def test_idempotent(self):

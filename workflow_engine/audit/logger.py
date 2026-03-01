@@ -48,6 +48,12 @@ class AuditAction(str, Enum):
     # Session
     SESSION_CREATED = "session.created"
 
+    # Automated reasoning
+    REASONING_VERIFIED = "reasoning.verified"
+    REASONING_VIOLATION = "reasoning.violation"
+    REASONING_REWRITE = "reasoning.rewrite"
+    COMPLIANCE_CHECK = "compliance.check"
+
 
 class AuditEntry:
     """A single audit trail entry."""
