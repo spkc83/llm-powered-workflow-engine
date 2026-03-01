@@ -22,6 +22,10 @@ httpx
 # Chat UI
 shiny
 
+# Automated reasoning
+z3-solver
+sympy
+
 # Testing
 pytest
 pytest-asyncio

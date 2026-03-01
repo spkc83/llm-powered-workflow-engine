@@ -1,0 +1,255 @@
+procedure:
+  id: cs_eft_dispute
+  name: "Customer Service - EFT Dispute (Reg E)"
+  description: "Handle electronic fund transfer disputes under Regulation E compliance. Covers unauthorized transactions, billing errors, and fraud on debit cards, ACH, and wire transfers."
+  version: "1.0"
+  trigger_intents:
+    - dispute
+    - unauthorized charge
+    - unauthorized transaction
+    - fraudulent charge
+    - eft dispute
+    - debit card dispute
+    - reg e
+    - unauthorized debit
+
+  steps:
+    - id: collect_dispute_info
+      instruction: >
+        Greet the customer and collect information about the disputed transaction. You need:
+        1. Which transaction is being disputed — ask for details like the merchant name,
+           approximate amount, and approximate date. Customers rarely know transaction IDs.
+        2. The type of dispute: unauthorized (someone else used their card/account) or
+           error (wrong amount charged, duplicate charge, etc.).
+        3. When they first noticed the issue (this affects Reg E liability tiers).
+
+        If the customer already provides these details in their message, acknowledge and
+        proceed immediately to the lookup step. Do NOT ask for information they already provided.
+
+        IMPORTANT: Under Regulation E, timing is critical. Note when the customer says they
+        first became aware of the unauthorized transfer — this determines their liability tier.
+      action: collect_info
+      required_info:
+        - transaction_description
+        - dispute_type
+        - when_noticed
+      next_step: lookup_transaction
+
+    - id: lookup_transaction
+      instruction: >
+        Search for the disputed transaction using the information provided. Use the customer's
+        ID (available as user_id) along with any details they gave (merchant name, amount, date).
+
+        Use `search_orders` if the dispute involves a purchase, or `lookup_dispute` if the
+        customer references a dispute ID (e.g., "DISP-001"). Also try searching transactions
+        if the customer describes an EFT, ACH, or debit card transaction.
+
+        Once found, confirm the transaction details with the customer:
+        "I found a transaction for $[AMOUNT] at [MERCHANT] on [DATE]. Is this the one you're disputing?"
+
+        If not found, ask for more details or transition to the not_found step.
+      action: tool_call
+      tool: lookup_dispute
+      tools:
+        - lookup_dispute
+        - search_orders
+        - get_customer_profile
+      on_success: assess_eligibility
+      on_failure: dispute_not_found
+
+    - id: assess_eligibility
+      instruction: >
+        Evaluate the dispute under Regulation E eligibility rules. This is the CRITICAL
+        compliance step. Determine:
+
+        1. REPORTING TIMELINE — calculate days since the statement date:
+           - Within 2 business days of learning of the loss: Tier 1 — max $50 liability
+           - Within 60 calendar days of the statement: Tier 2 — max $500 liability
+           - Beyond 60 calendar days: Tier 3 — consumer bears full liability
+
+        2. TRANSACTION TYPE — only electronic fund transfers are covered by Reg E:
+           - Covered: debit card purchases, ATM withdrawals, ACH transfers, P2P payments, wire transfers
+           - NOT covered: check transactions, credit card disputes (those fall under Reg Z)
+
+        3. DISPUTE TYPE:
+           - Unauthorized transfer: someone accessed the account without permission
+           - Error: wrong amount, duplicate charge, computational error, missing credit
+
+        Use `check_dispute_eligibility` to formally assess the dispute and determine the
+        liability tier. Do NOT inform the customer of the internal tier calculation details.
+        Internally determine the correct path based on the assessment.
+      action: tool_call
+      tool: check_dispute_eligibility
+      tools:
+        - check_dispute_eligibility
+      conditions:
+        - if: "dispute is eligible under Reg E (Tier 1 or Tier 2)"
+          next_step: file_dispute
+        - if: "dispute is outside 60-day window (Tier 3)"
+          next_step: deny_late_dispute
+        - if: "transaction type not covered by Reg E"
+          next_step: redirect_non_eft
+
+    - id: file_dispute
+      instruction: >
+        File the formal EFT dispute. Use the `file_eft_dispute` tool to create the dispute
+        record. This triggers the Reg E investigation timeline:
+
+        - The financial institution has 10 BUSINESS DAYS to investigate
+        - If more time is needed, PROVISIONAL CREDIT must be issued within 10 business days
+        - Final resolution must occur within 45 CALENDAR DAYS (90 days for new accounts,
+          POS transactions, or foreign-initiated transactions)
+
+        Inform the customer:
+        1. Their dispute has been filed (provide the dispute reference number)
+        2. Written acknowledgment will be sent within 1 business day
+        3. The investigation timeline: "We will investigate within 10 business days"
+        4. If applicable: "If we need more time, we will provide provisional credit to your account"
+        5. Their maximum liability based on reporting timeline (without exposing the tier system):
+           - Tier 1: "Your maximum liability is limited to $50"
+           - Tier 2: "Your maximum liability is limited to $500"
+
+        REQUIRED DISCLOSURES (Reg E mandated):
+        - Dispute reference number
+        - Investigation timeline (10 business days initial)
+        - Right to provisional credit if investigation extends
+        - Written acknowledgment within 1 business day
+      action: tool_call
+      tool: file_eft_dispute
+      tools:
+        - file_eft_dispute
+      on_success: assess_provisional_credit
+      on_failure: escalate_dispute
+
+    - id: assess_provisional_credit
+      instruction: >
+        Determine if provisional credit should be issued. Under Reg E:
+
+        - If investigation CANNOT be completed within 10 business days, provisional credit
+          MUST be issued for the disputed amount (minus the applicable liability amount)
+        - Provisional credit = disputed amount - max liability
+          (e.g., $350 dispute with Tier 1 = $350 - $50 = $300 provisional credit)
+
+        For our workflow, if the dispute amount exceeds the customer's liability tier limit,
+        offer provisional credit proactively. Use `issue_provisional_credit` to process it.
+
+        Inform the customer about the provisional credit amount and that it will remain
+        on their account unless the investigation determines the transaction was authorized.
+
+        After processing, proceed to close the dispute case.
+      action: tool_call
+      tool: issue_provisional_credit
+      tools:
+        - issue_provisional_credit
+      on_success: close_dispute
+      on_failure: close_dispute
+
+    - id: deny_late_dispute
+      instruction: >
+        The dispute was reported beyond the 60-day Reg E window. Under Regulation E,
+        the consumer bears full liability for unauthorized transfers reported after 60 days
+        from the statement date.
+
+        Be empathetic but clear:
+        1. Explain that the dispute was reported outside the required timeframe
+        2. Mention that federal regulations (Regulation E) require disputes to be reported
+           within 60 days of the statement date
+        3. Offer alternatives:
+           - File a courtesy review (non-Reg E) that may still result in recovery
+           - Escalate to a supervisor for further options
+           - Report to law enforcement if fraud is suspected
+        4. Recommend the customer monitor their account closely and report any future
+           unauthorized transactions promptly
+
+        Do NOT expose internal liability tier calculations. Simply explain the regulatory
+        timeframe requirement.
+      action: inform
+      options:
+        - label: "Customer requests courtesy review"
+          next_step: escalate_dispute
+        - label: "Customer accepts explanation"
+          next_step: close_dispute
+
+    - id: redirect_non_eft
+      instruction: >
+        The disputed transaction is not an electronic fund transfer covered by Regulation E.
+        This may be a credit card dispute (Reg Z), check dispute, or other non-EFT transaction.
+
+        Inform the customer:
+        1. This particular transaction type is handled under a different process
+        2. For credit card disputes: explain they have stronger protections under Reg Z
+           (Fair Credit Billing Act) with a $50 max liability regardless of timing
+        3. Offer to transfer them to the appropriate department or process
+
+        Be helpful and ensure the customer doesn't feel dismissed.
+      action: inform
+      options:
+        - label: "Customer wants to proceed with alternative dispute process"
+          next_step: escalate_dispute
+        - label: "Customer has no further questions"
+          next_step: close_dispute
+
+    - id: escalate_dispute
+      instruction: >
+        Escalate the dispute to a senior representative or specialized disputes team.
+        Provide a complete summary of:
+        1. The disputed transaction details (amount, merchant, date)
+        2. The dispute type (unauthorized, error)
+        3. The Reg E eligibility assessment
+        4. What has been communicated to the customer
+
+        Use the `escalate_to_supervisor` tool with priority "high" for Reg E disputes
+        (they have regulatory deadlines).
+
+        Inform the customer:
+        - Their case has been escalated with priority handling
+        - Provide the case reference number
+        - Estimated response time (24-48 hours for Reg E disputes)
+      action: tool_call
+      tool: escalate_to_supervisor
+      tools:
+        - escalate_to_supervisor
+        - add_case_note
+      on_success: close_dispute
+      on_failure: close_dispute
+
+    - id: dispute_not_found
+      instruction: >
+        Unable to locate the disputed transaction. Ask the customer to verify:
+        1. The approximate date of the transaction
+        2. The merchant or description
+        3. The approximate amount
+        4. Which account or card was used
+
+        If the customer provides updated information, try the lookup again.
+        If still not found, offer to escalate to the disputes team who can search
+        with additional tools.
+      action: inform
+      options:
+        - label: "Customer provides more details"
+          next_step: lookup_transaction
+        - label: "Customer wants to escalate"
+          next_step: escalate_dispute
+
+    - id: close_dispute
+      instruction: >
+        Wrap up the dispute interaction. Summarize what was done:
+
+        1. Dispute filed: reference number, investigation timeline
+        2. Provisional credit: if issued, the amount and when it will appear
+        3. Next steps: written acknowledgment within 1 business day, investigation results
+           within 10 business days (or 45 calendar days if extended)
+        4. Customer rights: right to request copies of documents used in investigation
+
+        Update the case status and check if the customer has any other questions.
+
+        REQUIRED: Thank the customer for reporting promptly and remind them to monitor
+        their account for any additional unauthorized activity.
+      action: tool_call
+      tool: update_case_status
+      tools:
+        - update_case_status
+        - add_case_note
+      on_success: end
+      on_failure: end
+      next_step: end

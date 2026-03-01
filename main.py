@@ -27,7 +27,7 @@ from google.adk.sessions import DatabaseSessionService
 from google.genai import types as genai_types
 
 from workflow_engine.agent import registry, root_agent
-from workflow_engine.agents.guardrails import filter_response
+from workflow_engine.agents.guardrails import filter_response, steer_response
 from workflow_engine.audit.logger import init_audit_logger
 from workflow_engine.channels.base import ChannelType, OutboundMessage
 from workflow_engine.channels.http import HttpChannel, WebSocketChannel
@@ -69,6 +69,7 @@ _ALLOWED_TABLES = {
     "risk_indicators",
     "cases",
     "case_notes",
+    "disputes",
     "escalations",
     "refunds",
     "knowledge_articles",
@@ -276,13 +277,38 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
 
         response_text = "\n\n".join(response_parts) if response_parts else ""
 
-        # Apply guardrails — filter internal data leakage from agent output
-        response_text, violations = filter_response(response_text)
+        # Apply guardrails — layered pipeline: pattern rails → reasoning → compliance → steering
+        # Extract procedure context from session state for reasoning verification
+        active_procedure_id = session.state.get("current_procedure") if session.state else None
+        active_step = session.state.get("current_step") if session.state else None
+        session_state_dict = dict(session.state) if session.state else {}
+
+        # Look up the procedure definition for rule extraction
+        procedure_def = None
+        if active_procedure_id and active_procedure_id in registry.procedures:
+            procedure_def = registry.procedures[active_procedure_id]
+
+        response_text, violations, verification = await steer_response(
+            text=response_text,
+            session_state=session_state_dict,
+            procedure_id=active_procedure_id,
+            current_step=active_step,
+            procedure_def=procedure_def,
+            generate_fn=None,  # No rewrite loop for now — requires LLM callback
+            max_iterations=2,
+        )
         if violations:
             logger.warning(
                 "Guardrail violations filtered from response (session=%s): %s",
                 session_id,
                 [v.rule for v in violations],
+            )
+        if verification and not verification.is_valid and verification.verdict != "NOT_APPLICABLE":
+            logger.warning(
+                "Reasoning verification result (session=%s): verdict=%s, findings=%d",
+                session_id,
+                verification.verdict,
+                len(verification.findings),
             )
 
         logger.info("Chat response generated (len=%d)", len(response_text))

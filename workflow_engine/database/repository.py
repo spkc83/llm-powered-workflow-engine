@@ -283,6 +283,101 @@ class KnowledgeRepository:
         return matched if matched else all_articles[:2]
 
 
+class DisputeRepository:
+    """Data access for EFT disputes (Reg E compliance)."""
+
+    @staticmethod
+    async def get_by_id(dispute_id: str) -> Optional[dict]:
+        """Fetch a dispute by ID."""
+        return await query_one(
+            "SELECT * FROM disputes WHERE dispute_id = ?",
+            (dispute_id,),
+        )
+
+    @staticmethod
+    async def get_by_customer(customer_id: str) -> list[dict]:
+        """Fetch all disputes for a customer."""
+        return await query_all(
+            "SELECT * FROM disputes WHERE customer_id = ? ORDER BY reported_date DESC",
+            (customer_id,),
+        )
+
+    @staticmethod
+    async def get_by_transaction(transaction_id: str) -> Optional[dict]:
+        """Fetch a dispute by transaction ID."""
+        return await query_one(
+            "SELECT * FROM disputes WHERE transaction_id = ?",
+            (transaction_id,),
+        )
+
+    @staticmethod
+    async def create(
+        dispute_id: str,
+        customer_id: str,
+        transaction_id: str,
+        account_id: str,
+        dispute_type: str,
+        amount: float,
+        merchant: str,
+        transaction_date: str,
+        reported_date: str,
+        statement_date: str,
+        days_since_transaction: int,
+        days_since_statement: int,
+        liability_tier: str,
+        max_liability: float,
+        investigation_deadline: str,
+        payment_method: str,
+        metadata: Optional[str] = None,
+    ) -> int:
+        """Create a new dispute record."""
+        return await execute(
+            """
+            INSERT INTO disputes (dispute_id, customer_id, transaction_id, account_id,
+                                  dispute_type, amount, merchant, transaction_date,
+                                  reported_date, statement_date, days_since_transaction,
+                                  days_since_statement, liability_tier, max_liability,
+                                  investigation_deadline, payment_method, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dispute_id, customer_id, transaction_id, account_id, dispute_type,
+             amount, merchant, transaction_date, reported_date, statement_date,
+             days_since_transaction, days_since_statement, liability_tier,
+             max_liability, investigation_deadline, payment_method, metadata),
+        )
+
+    @staticmethod
+    async def update_status(dispute_id: str, status: str, **kwargs) -> None:
+        """Update dispute status and optional fields."""
+        sets = ["status = ?"]
+        params: list = [status]
+        for key, val in kwargs.items():
+            if val is not None:
+                sets.append(f"{key} = ?")
+                params.append(val)
+        params.append(dispute_id)
+        await execute(
+            f"UPDATE disputes SET {', '.join(sets)} WHERE dispute_id = ?",
+            tuple(params),
+        )
+
+    @staticmethod
+    async def issue_provisional_credit(
+        dispute_id: str, amount: float, credit_date: str,
+    ) -> None:
+        """Record provisional credit issuance."""
+        await execute(
+            """
+            UPDATE disputes SET provisional_credit_issued = 1,
+                                provisional_credit_amount = ?,
+                                provisional_credit_date = ?,
+                                status = 'provisional_credit'
+            WHERE dispute_id = ?
+            """,
+            (amount, credit_date, dispute_id),
+        )
+
+
 class AuditRepository:
     """Data access for audit trail entries."""
 

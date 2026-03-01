@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Coroutine, Optional
 
+from ..agents.guardrails import validate_tool_args
 from ..audit import AuditAction, get_audit_logger
 from ..errors import ProcedureError, ErrorCode
 from ..logging_config import get_logger
@@ -151,6 +152,41 @@ class ProcedureExecutor:
     def on_step_exit(self, hook: StepHook) -> None:
         """Register a hook called when exiting any step."""
         self._on_exit_hooks.append(hook)
+
+    def validate_step_tools(self, step_id: str, tool_name: str, args: dict) -> list:
+        """Validate tool arguments before execution at a given step.
+
+        Uses the guardrails validate_tool_args function and also checks
+        that the tool is permitted for the current step.
+
+        Args:
+            step_id: The step attempting to use the tool.
+            tool_name: The tool being called.
+            args: The arguments being passed to the tool.
+
+        Returns:
+            List of GuardrailViolation objects (empty if valid).
+        """
+        violations = validate_tool_args(tool_name, args)
+
+        # Check that the tool is allowed for this step
+        allowed = self.get_allowed_tools()
+        if allowed and tool_name not in allowed:
+            from ..agents.guardrails import GuardrailViolation
+            violations.append(GuardrailViolation(
+                rule="tool_not_allowed_for_step",
+                description=(
+                    f"Tool '{tool_name}' is not permitted at step '{step_id}'. "
+                    f"Allowed tools: {allowed}"
+                ),
+                severity="block",
+            ))
+            logger.warning(
+                "Tool '%s' blocked at step '%s' — not in allowed list %s",
+                tool_name, step_id, allowed,
+            )
+
+        return violations
 
     # --- Execution control ---
 

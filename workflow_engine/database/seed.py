@@ -20,6 +20,7 @@ async def seed_all() -> None:
         await _seed_login_history(db)
         await _seed_risk_indicators(db)
         await _seed_knowledge_articles(db)
+        await _seed_disputes(db)
         await db.commit()
 
 
@@ -192,4 +193,114 @@ async def _seed_knowledge_articles(db: aiosqlite.Connection) -> None:
     await db.executemany(
         "INSERT OR IGNORE INTO knowledge_articles (article_id, title, summary, content, relevance_score) VALUES (?, ?, ?, ?, ?)",
         articles,
+    )
+
+
+async def _seed_disputes(db: aiosqlite.Connection) -> None:
+    """Seed EFT dispute data for Reg E compliance testing.
+
+    Test scenarios cover all three Reg E liability tiers and various dispute states:
+    - DISP-001: CUST-456 — Unauthorized debit card charge, reported within 2 days (Tier 1: $50 max liability)
+    - DISP-002: CUST-789 — Unauthorized ACH transfer, reported at 15 days (Tier 2: $500 max liability)
+    - DISP-003: CUST-012 — Unauthorized charge, reported at 75 days (Tier 3: unlimited liability, outside 60-day window)
+    - DISP-004: CUST-345 — Error dispute (wrong amount charged), reported within 2 days (Tier 1)
+    """
+    now = datetime.now()
+    disputes = [
+        # DISP-001: Tier 1 — reported within 2 business days, max $50 liability
+        # Customer Jane Smith noticed unauthorized charge yesterday, debit card
+        (
+            "DISP-001", "CUST-456", "TXN-EFT-001", "ACCT-1001",
+            "unauthorized", 350.00, "Unknown Electronics Store",
+            (now - timedelta(days=3)).strftime("%Y-%m-%d"),    # transaction 3 days ago
+            (now - timedelta(days=1)).strftime("%Y-%m-%d"),    # reported yesterday (within 2 days of learning)
+            (now - timedelta(days=1)).strftime("%Y-%m-%d"),    # statement issued 1 day ago
+            3, 1, "tier_1", 50.00,
+            (now + timedelta(days=10)).strftime("%Y-%m-%d"),   # investigation deadline
+            "debit_card",
+            "open", 0, None, None, None, None, None,
+        ),
+        # DISP-002: Tier 2 — reported at 15 days, max $500 liability
+        # Customer Bob Johnson noticed unauthorized ACH withdrawal
+        (
+            "DISP-002", "CUST-789", "TXN-EFT-002", "ACCT-2002",
+            "unauthorized", 1250.00, "Unknown Wire Transfer",
+            (now - timedelta(days=20)).strftime("%Y-%m-%d"),   # transaction 20 days ago
+            (now - timedelta(days=5)).strftime("%Y-%m-%d"),    # reported 5 days ago (15 days after txn)
+            (now - timedelta(days=18)).strftime("%Y-%m-%d"),   # statement 18 days ago
+            20, 13, "tier_2", 500.00,
+            (now + timedelta(days=5)).strftime("%Y-%m-%d"),    # investigation deadline
+            "ach",
+            "investigating", 0, None, None, None, None, None,
+        ),
+        # DISP-003: Tier 3 — reported at 75 days, beyond 60-day window = unlimited liability
+        # Customer Alice Williams finally noticed old unauthorized charge
+        (
+            "DISP-003", "CUST-012", "TXN-EFT-003", "ACCT-3003",
+            "unauthorized", 500.00, "Suspicious Online Store",
+            (now - timedelta(days=90)).strftime("%Y-%m-%d"),   # transaction 90 days ago
+            (now - timedelta(days=2)).strftime("%Y-%m-%d"),    # reported 2 days ago
+            (now - timedelta(days=75)).strftime("%Y-%m-%d"),   # statement 75 days ago
+            90, 73, "tier_3", 500.00,  # unlimited = full amount
+            (now + timedelta(days=8)).strftime("%Y-%m-%d"),
+            "debit_card",
+            "open", 0, None, None, None, None, None,
+        ),
+        # DISP-004: Error dispute — wrong amount charged (not unauthorized), Tier 1
+        # Customer Carol Davis was charged wrong amount
+        (
+            "DISP-004", "CUST-345", "TXN-EFT-004", "ACCT-4004",
+            "error", 89.99, "HomeOffice Supplies",
+            (now - timedelta(days=5)).strftime("%Y-%m-%d"),    # transaction 5 days ago
+            (now - timedelta(days=1)).strftime("%Y-%m-%d"),    # reported yesterday
+            (now - timedelta(days=2)).strftime("%Y-%m-%d"),    # statement 2 days ago
+            5, 1, "tier_1", 50.00,
+            (now + timedelta(days=9)).strftime("%Y-%m-%d"),
+            "debit_card",
+            "open", 0, None, None, None, None, None,
+        ),
+    ]
+    await db.executemany(
+        """INSERT OR IGNORE INTO disputes (
+            dispute_id, customer_id, transaction_id, account_id,
+            dispute_type, amount, merchant, transaction_date,
+            reported_date, statement_date,
+            days_since_transaction, days_since_statement, liability_tier, max_liability,
+            investigation_deadline, payment_method,
+            status, provisional_credit_issued, provisional_credit_date,
+            provisional_credit_amount, resolution, resolution_date, resolution_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        disputes,
+    )
+
+    # Also seed the corresponding EFT transactions into the transactions table
+    eft_transactions = [
+        ("TXN-EFT-001", "ACCT-1001", 350.00, "Unknown Electronics Store",
+         (now - timedelta(days=3)).isoformat(), "Online", 1, "debit"),
+        ("TXN-EFT-002", "ACCT-2002", 1250.00, "Unknown Wire Transfer",
+         (now - timedelta(days=20)).isoformat(), "ACH", 1, "ach_withdrawal"),
+        ("TXN-EFT-003", "ACCT-3003", 500.00, "Suspicious Online Store",
+         (now - timedelta(days=90)).isoformat(), "Online", 1, "debit"),
+        ("TXN-EFT-004", "ACCT-4004", 89.99, "HomeOffice Supplies",
+         (now - timedelta(days=5)).isoformat(), "In-Store", 0, "debit"),
+    ]
+    await db.executemany(
+        "INSERT OR IGNORE INTO transactions (txn_id, account_id, amount, merchant, date, location, is_flagged, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        eft_transactions,
+    )
+
+    # Add Reg E knowledge article
+    await db.execute(
+        "INSERT OR IGNORE INTO knowledge_articles (article_id, title, summary, content, relevance_score) VALUES (?, ?, ?, ?, ?)",
+        (
+            "KB-005",
+            "Regulation E — EFT Dispute Rights",
+            "Under Regulation E, consumers must report unauthorized electronic fund transfers within 60 days "
+            "of the statement date. Liability tiers: within 2 business days = $50 max; within 60 days = $500 max; "
+            "beyond 60 days = unlimited. Financial institutions must investigate within 10 business days and may "
+            "issue provisional credit if investigation extends beyond 10 days. Final resolution within 45 calendar days "
+            "(90 days for new accounts, POS, or foreign transactions).",
+            None,
+            0.90,
+        ),
     )

@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     tracing_enabled: bool = Field(default=False, description="Enable OpenTelemetry tracing")
     tracing_endpoint: Optional[str] = Field(default=None, description="OTLP endpoint")
 
+    # --- Automated Reasoning ---
+    reasoning_enabled: bool = Field(default=True, description="Enable Z3/SymPy reasoning verification")
+    reasoning_max_iterations: int = Field(default=2, ge=0, le=5, description="Max rewrite iterations for behavior steering")
+    compliance_enabled: bool = Field(default=True, description="Enable domain-specific compliance checks")
+
     # --- Session ---
     session_ttl_hours: int = Field(default=24, description="Session TTL in hours")
     app_name: str = Field(default="workflow_engine", description="Application name for ADK")
