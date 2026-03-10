@@ -245,7 +245,7 @@ The `seed_all()` function in `workflow_engine/database/seed.py` populates the da
 - **7 risk indicators** — for accounts 1001 and 2002
 - **4 knowledge articles** — refund policy, escalation, fraud guidelines, store credit
 
-Seeding is idempotent — running it multiple times will not create duplicates (`INSERT OR IGNORE` and count-based guards).
+Seeding is idempotent — running it multiple times will not create duplicates. Time-sensitive tables (orders, transactions, fraud_alerts, disputes) use `INSERT OR REPLACE` so that computed dates stay current on each restart. Static tables use `INSERT OR IGNORE` and count-based guards.
 
 ## ADK Session Tables
 

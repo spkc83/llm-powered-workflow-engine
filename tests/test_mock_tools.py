@@ -92,6 +92,29 @@ class TestLookupOrder:
         result = await lookup_order("ORD-123", ctx)
         assert result["merchant_name"] == "TechMart Electronics"
 
+    @pytest.mark.asyncio
+    async def test_rejects_order_for_wrong_customer(self):
+        """lookup_order must verify that the order belongs to the session customer."""
+        ctx = make_tool_context({"customer_id": "CUST-789"})
+        result = await lookup_order("ORD-123", ctx)  # ORD-123 belongs to CUST-456
+        assert result["found"] is False
+        assert "order_data" not in ctx.state
+
+    @pytest.mark.asyncio
+    async def test_allows_order_for_correct_customer(self):
+        """lookup_order succeeds when session customer matches order owner."""
+        ctx = make_tool_context({"customer_id": "CUST-456"})
+        result = await lookup_order("ORD-123", ctx)  # ORD-123 belongs to CUST-456
+        assert result["found"] is True
+        assert ctx.state["order_data"]["order_id"] == "ORD-123"
+
+    @pytest.mark.asyncio
+    async def test_allows_order_when_no_session_customer(self):
+        """lookup_order works without session customer_id (backward compat)."""
+        ctx = make_tool_context()
+        result = await lookup_order("ORD-123", ctx)
+        assert result["found"] is True
+
 
 class TestSearchOrders:
     @pytest.mark.asyncio
@@ -136,6 +159,15 @@ class TestSearchOrders:
         result = await search_orders("CUST-456", ctx, merchant_name="NonexistentStore")
         assert result["count"] == 0
         assert "No orders found" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_without_date_when_date_misses(self):
+        """If the date filter is too narrow, retry without it using merchant_name."""
+        ctx = make_tool_context()
+        # Use a date far from any order — fallback should still find by merchant
+        result = await search_orders("CUST-345", ctx, merchant_name="HomeOffice", date="2020-01-01")
+        assert result["count"] == 1
+        assert result["matches"][0]["order_id"] == "ORD-999"
 
 
 class TestGetCustomerProfile:

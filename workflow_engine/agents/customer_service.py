@@ -4,7 +4,7 @@ from google.adk.agents import Agent
 from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
-from ..tools.crm_tools import lookup_order, get_customer_profile, issue_refund, update_case_status, search_orders
+from ..tools.crm_tools import lookup_order, get_customer_profile, issue_refund, issue_store_credit, update_case_status, search_orders
 from ..tools.common_tools import escalate_to_supervisor, add_case_note, get_knowledge_article
 from ..tools.dispute_tools import lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
 
@@ -50,6 +50,24 @@ CRITICAL — Infer details from natural language, do NOT ask for order IDs:
   too many ambiguous results. Even then, ask clarifying questions about the purchase
   (which store? what item? how much?) — not for an order ID.
 
+CRITICAL — Trust tool results, NEVER fabricate order data:
+- You MUST only use order information returned by `lookup_order` or `search_orders`. NEVER
+  invent, guess, or assume order details (order ID, merchant, amount, date, items) that were
+  not explicitly present in a tool response.
+- If `search_orders` returns count=0 or an empty matches list, the customer has NO matching
+  order. Do NOT proceed as if you found one. Instead, follow the order_not_found path:
+  apologize and ask the customer for more details about their purchase.
+- If `lookup_order` returns found=False, the order does not exist or does not belong to this
+  customer. Do NOT fabricate alternative order details.
+- NEVER say "I found your order" or present order details unless a tool call in THIS
+  conversation actually returned that data with found=True or count > 0.
+
+CONTEXT — use these values, do NOT invent your own:
+- The current customer's ID is: {customer_id}
+- Today's date is: {current_date}
+When calling search_orders, ALWAYS use customer_id="{customer_id}". When interpreting
+relative dates like "a week ago" or "yesterday", calculate from today's date {current_date}.
+
 Additional guidelines:
 - Always confirm the customer's identity/order before taking actions
 - Store important data from tool calls for reference in later steps
@@ -72,8 +90,7 @@ TOOL_MAP = {
     "check_dispute_eligibility": check_dispute_eligibility,
     "file_eft_dispute": file_eft_dispute,
     "issue_provisional_credit": issue_provisional_credit,
-    # issue_store_credit is referenced in YAML but not implemented;
-    # the agent will use issue_refund or escalate as alternatives
+    "issue_store_credit": issue_store_credit,
 }
 
 

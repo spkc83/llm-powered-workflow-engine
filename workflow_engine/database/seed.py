@@ -46,7 +46,7 @@ async def _seed_orders(db: aiosqlite.Connection) -> None:
         ("ORD-999", "CUST-345", "HomeOffice Supplies", 49.99, "delivered", (now - timedelta(days=45)).strftime("%Y-%m-%d"), (now - timedelta(days=40)).strftime("%Y-%m-%d"), 40, "debit_card_ending_5678", "321 Elm St, Denver, CO 80201"),
     ]
     await db.executemany(
-        "INSERT OR IGNORE INTO orders (order_id, customer_id, merchant_name, total, status, order_date, delivery_date, days_since_delivery, payment_method, shipping_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO orders (order_id, customer_id, merchant_name, total, status, order_date, delivery_date, days_since_delivery, payment_method, shipping_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         orders,
     )
 
@@ -103,7 +103,7 @@ async def _seed_transactions(db: aiosqlite.Connection) -> None:
         ("TXN-7003", "ACCT-3003", 15.99, "Music Streaming", (now - timedelta(days=7)).isoformat(), "Online", 0, "subscription"),
     ]
     await db.executemany(
-        "INSERT OR IGNORE INTO transactions (txn_id, account_id, amount, merchant, date, location, is_flagged, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO transactions (txn_id, account_id, amount, merchant, date, location, is_flagged, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         transactions,
     )
 
@@ -117,7 +117,7 @@ async def _seed_fraud_alerts(db: aiosqlite.Connection) -> None:
         ("FA-004", "unusual_activity", "low", 25, "ACCT-4004", "Emily Brown", (now - timedelta(hours=12)).isoformat(), "Minor velocity check trigger - 3 small transactions in quick succession at same merchant", 45.97, 3, "open"),
     ]
     await db.executemany(
-        "INSERT OR IGNORE INTO fraud_alerts (alert_id, type, severity, risk_score, account_id, customer_name, triggered_at, description, amount_involved, transactions_flagged, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO fraud_alerts (alert_id, type, severity, risk_score, account_id, customer_name, triggered_at, description, amount_involved, transactions_flagged, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         alerts,
     )
 
@@ -261,7 +261,7 @@ async def _seed_disputes(db: aiosqlite.Connection) -> None:
         ),
     ]
     await db.executemany(
-        """INSERT OR IGNORE INTO disputes (
+        """INSERT OR REPLACE INTO disputes (
             dispute_id, customer_id, transaction_id, account_id,
             dispute_type, amount, merchant, transaction_date,
             reported_date, statement_date,
@@ -285,7 +285,7 @@ async def _seed_disputes(db: aiosqlite.Connection) -> None:
          (now - timedelta(days=5)).isoformat(), "In-Store", 0, "debit"),
     ]
     await db.executemany(
-        "INSERT OR IGNORE INTO transactions (txn_id, account_id, amount, merchant, date, location, is_flagged, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO transactions (txn_id, account_id, amount, merchant, date, location, is_flagged, type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         eft_transactions,
     )
 
