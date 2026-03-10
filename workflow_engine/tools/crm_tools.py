@@ -32,6 +32,15 @@ async def lookup_order(order_id: str, tool_context: ToolContext) -> dict:
     if order is None:
         return {"error": f"Order {order_id} not found", "found": False}
 
+    # Verify the order belongs to the current customer
+    session_customer_id = tool_context.state.get("customer_id")
+    if session_customer_id and order["customer_id"] != session_customer_id:
+        logger.warning(
+            "Customer %s attempted to access order %s belonging to %s",
+            session_customer_id, order_id, order["customer_id"],
+        )
+        return {"error": f"Order {order_id} not found", "found": False}
+
     items = await OrderRepository.get_items(order_id)
 
     # Compute days_since_delivery dynamically
@@ -154,6 +163,65 @@ async def issue_refund(order_id: str, reason: str, tool_context: ToolContext) ->
     return result
 
 
+async def issue_store_credit(order_id: str, reason: str, tool_context: ToolContext) -> dict:
+    """Issue store credit for a given order (e.g., when outside the refund window).
+
+    Args:
+        order_id: The order ID to issue store credit for.
+        reason: The reason for issuing store credit.
+    """
+    order_data = tool_context.state.get("order_data", {})
+    amount = order_data.get("total", 0)
+    customer_id = tool_context.state.get("customer_id", "unknown")
+
+    credit_id = f"SC-{order_id.split('-')[1]}-{datetime.now().strftime('%H%M%S')}"
+    processed_at = datetime.now().isoformat()
+
+    logger.info("Issuing store credit %s for order %s (amount=%.2f)", credit_id, order_id, amount)
+
+    await RefundRepository.create(
+        refund_id=credit_id,
+        order_id=order_id,
+        amount=amount,
+        reason=reason,
+        refund_method="store_credit",
+        processed_at=processed_at,
+    )
+
+    result = {
+        "credit_id": credit_id,
+        "order_id": order_id,
+        "amount": amount,
+        "currency": "USD",
+        "status": "applied",
+        "reason": reason,
+        "credit_method": "store_credit",
+        "expires": "12 months",
+        "processed_at": processed_at,
+    }
+
+    tool_context.state["store_credit_data"] = result
+    tool_context.state["workflow_status"] = "store_credit_issued"
+
+    # Audit — compliance-critical
+    audit = get_audit_logger()
+    await audit.log(
+        action=AuditAction.STORE_CREDIT_ISSUED,
+        actor=customer_id,
+        resource_type="store_credit",
+        resource_id=credit_id,
+        session_id=str(getattr(tool_context, "session_id", None)),
+        metadata={
+            "order_id": order_id,
+            "amount": amount,
+            "currency": "USD",
+            "reason": reason,
+        },
+    )
+
+    return result
+
+
 async def update_case_status(case_id: str, status: str, notes: str, tool_context: ToolContext) -> dict:
     """Update the status of a customer service case.
 
@@ -231,6 +299,18 @@ async def search_orders(
         date=date,
     )
 
+    # Fallback: if date filter produced no results, retry without it.
+    # Vague terms like "last month" can be off by weeks; merchant_name alone
+    # is usually enough to identify the order.
+    if not rows and date and (merchant_name or amount):
+        logger.info("Date-filtered search returned 0 results; retrying without date")
+        rows = await OrderRepository.search(
+            customer_id=customer_id,
+            merchant_name=merchant_name,
+            amount=amount,
+            date=None,
+        )
+
     # Audit
     audit = get_audit_logger()
     await audit.log(
@@ -282,6 +362,15 @@ async def search_orders(
     if len(matches) == 1:
         match = matches[0]
         order = await OrderRepository.get_by_id(match["order_id"])
+
+        # Defense-in-depth: verify the order belongs to the requesting customer
+        if order["customer_id"] != customer_id:
+            logger.warning(
+                "search_orders: order %s belongs to %s, not requesting customer %s",
+                match["order_id"], order["customer_id"], customer_id,
+            )
+            return {"matches": [], "count": 0, "message": "No orders found matching that description."}
+
         items = await OrderRepository.get_items(match["order_id"])
         order_data = {
             "order_id": order["order_id"],

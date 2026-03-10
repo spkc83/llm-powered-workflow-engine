@@ -104,10 +104,11 @@ class TestCreateRouterAgent:
         instr = agent.instruction.lower()
         assert "customer service" in instr or "route" in instr or "specialist" in instr
 
-    def test_general_agent_has_no_tools(self):
+    def test_general_agent_has_knowledge_tool(self):
         from workflow_engine.agents.router import create_general_agent
         agent = create_general_agent()
-        assert not agent.tools
+        tool_names = [t.__name__ for t in agent.tools]
+        assert "get_knowledge_article" in tool_names
 
     def test_general_agent_description_set(self):
         from workflow_engine.agents.router import create_general_agent

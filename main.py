@@ -11,6 +11,7 @@ Enterprise-grade application with:
 
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -246,12 +247,16 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
                 app_name=settings.app_name,
                 user_id=inbound.user_id,
                 session_id=session_id,
-                state={"customer_id": inbound.user_id},
+                state={
+                    "customer_id": inbound.user_id,
+                    "current_date": date.today().isoformat(),
+                },
             )
 
-        # Ensure customer_id is always available in session state
+        # Ensure customer_id and current_date are always available in session state
         if not session.state.get("customer_id"):
             session.state["customer_id"] = inbound.user_id
+        session.state["current_date"] = date.today().isoformat()
 
         # Build user message
         user_message = genai_types.Content(
@@ -260,7 +265,7 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
         )
 
         # Run agent and collect response text from sub-agents
-        response_parts = []
+        response_parts: list[str] = []
         async for event in runner.run_async(
             user_id=inbound.user_id,
             session_id=session_id,
@@ -273,9 +278,20 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
             ):
                 for part in event.content.parts:
                     if part.text:
-                        response_parts.append(part.text)
+                        # Skip duplicate text from multi-turn tool call loops
+                        text = part.text.strip()
+                        if text and (not response_parts or text != response_parts[-1].strip()):
+                            response_parts.append(part.text)
 
         response_text = "\n\n".join(response_parts) if response_parts else ""
+
+        # Fallback when the model produces no output (e.g., STOP with no content)
+        if not response_text.strip():
+            logger.warning("Empty response from agent for session=%s", session_id)
+            response_text = (
+                "I'm sorry, I wasn't able to process your request. "
+                "Could you please rephrase or provide more details?"
+            )
 
         # Apply guardrails — layered pipeline: pattern rails → reasoning → compliance → steering
         # Extract procedure context from session state for reasoning verification
@@ -426,11 +442,15 @@ async def websocket_chat(websocket: WebSocket):
                         app_name=settings.app_name,
                         user_id=user_id,
                         session_id=session_id,
-                        state={"customer_id": user_id},
+                        state={
+                            "customer_id": user_id,
+                            "current_date": date.today().isoformat(),
+                        },
                     )
 
                 if not session.state.get("customer_id"):
                     session.state["customer_id"] = user_id
+                session.state["current_date"] = date.today().isoformat()
 
                 user_message = genai_types.Content(
                     role="user",

@@ -55,7 +55,8 @@ router_agent (configurable — default: Gemini 2.5 Flash)
 │             check_device_fingerprint, flag_account,
 │             submit_sar, close_alert, escalate_to_supervisor,
 │             add_case_note
-└── general_agent — greetings, general questions, fallback
+└── general_agent — greetings, general questions, policy inquiries, fallback
+    └── Tools: get_knowledge_article
 ```
 
 The **router agent** examines user intent and delegates to the appropriate specialist. Each specialist agent receives procedure-derived instructions that guide it through a structured workflow while maintaining natural conversation.
@@ -190,7 +191,7 @@ pytest tests/ -v
 │   │   └── rate_limiter.py         # In-memory rate limiting
 │   │
 │   ├── tools/                      # Tool implementations (async, SQLite-backed)
-│   │   ├── crm_tools.py            # lookup_order, search_orders, get_customer_profile, issue_refund, update_case_status
+│   │   ├── crm_tools.py            # lookup_order, search_orders, get_customer_profile, issue_refund, issue_store_credit, update_case_status
 │   │   ├── fraud_tools.py          # get_fraud_alert, get_account_transactions, check_device_fingerprint, flag_account, submit_sar, close_alert
 │   │   ├── common_tools.py         # escalate_to_supervisor, add_case_note, get_knowledge_article
 │   │   └── dispute_tools.py        # lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
@@ -217,7 +218,7 @@ pytest tests/ -v
 │   ├── database.md                 # Schema reference
 │   └── procedures.md               # Procedure authoring guide
 │
-└── tests/                          # Test suite (352+ tests)
+└── tests/                          # Test suite (356+ tests)
     ├── test_database.py            # DB init, seed, query helpers
     ├── test_mock_tools.py          # All tool functions (async, uses temp DB)
     ├── test_workflow_state.py      # State tracking logic

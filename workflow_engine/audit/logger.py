@@ -20,6 +20,7 @@ class AuditAction(str, Enum):
     ORDER_LOOKUP = "order.lookup"
     ORDER_SEARCH = "order.search"
     REFUND_ISSUED = "refund.issued"
+    STORE_CREDIT_ISSUED = "store_credit.issued"
     CASE_UPDATED = "case.updated"
     CASE_NOTE_ADDED = "case.note_added"
 
