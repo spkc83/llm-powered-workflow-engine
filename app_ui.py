@@ -28,6 +28,24 @@ TEST_SCENARIOS = {
             "message": "I need to investigate fraud alert FA-001",
             "description": "High severity alert",
         },
+        {
+            "label": "EFT dispute — Tier 1 (within 2 days)",
+            "customer_id": "CUST-456",
+            "message": "I want to dispute an unauthorized charge on my debit card. I noticed a $150 charge from QuickMart Online yesterday that I didn't make.",
+            "description": "DISP-001 — Tier 1, $50 max liability, should file + provisional credit",
+        },
+        {
+            "label": "EFT dispute — Tier 2 (within 60 days)",
+            "customer_id": "CUST-789",
+            "message": "I need to dispute an unauthorized ACH transfer. About two weeks ago I noticed $2500 was withdrawn from my account by MegaCorp Services. I never authorized this.",
+            "description": "DISP-002 — Tier 2, $500 max liability, should file + provisional credit",
+        },
+        {
+            "label": "EFT dispute — error (wrong amount)",
+            "customer_id": "CUST-345",
+            "message": "I was charged the wrong amount on my debit card at FreshMart Grocery. The receipt shows $45.50 but my account was debited $455.00. This happened a couple of days ago.",
+            "description": "DISP-004 — Error dispute, Tier 1, should file dispute for billing error",
+        },
     ],
     "negative": [
         {
@@ -60,6 +78,24 @@ TEST_SCENARIOS = {
             "message": "What is your return policy?",
             "description": "No matching procedure",
         },
+        {
+            "label": "EFT dispute — Tier 3 (outside 60-day window)",
+            "customer_id": "CUST-012",
+            "message": "I want to dispute an unauthorized debit card charge from about 3 months ago. Someone used my card at LuxuryGoods Outlet for $500.",
+            "description": "DISP-003 — Tier 3, beyond 60 days, should be denied under Reg E",
+        },
+        {
+            "label": "EFT dispute — non-EFT payment method",
+            "customer_id": "CUST-456",
+            "message": "I want to dispute an unauthorized charge on my credit card. Someone used my Visa credit card to make a $200 purchase at ElectroMart.",
+            "description": "Credit card not covered by Reg E — should redirect to Reg Z process",
+        },
+        {
+            "label": "EFT dispute — no matching transaction",
+            "customer_id": "CUST-789",
+            "message": "I want to dispute a debit card charge of $999 from a store called FakeStore that happened last week.",
+            "description": "Transaction doesn't exist — dispute_not_found path",
+        },
     ],
     "multi_turn": [
         {
@@ -73,6 +109,12 @@ TEST_SCENARIOS = {
             "customer_id": "CUST-789",
             "message": "My order ORD-456 hasn't arrived yet and it's been 3 days",
             "description": "Shipped, not delivered → delivery complaint flow",
+        },
+        {
+            "label": "EFT dispute → escalation",
+            "customer_id": "CUST-012",
+            "message": "I want to dispute an unauthorized charge on my debit card from about 3 months ago. Someone charged $500 at LuxuryGoods Outlet.",
+            "description": "Tier 3 deny → follow up with 'I want to speak to a supervisor' to test escalation",
         },
     ],
 }
@@ -162,6 +204,7 @@ app_ui = ui.page_sidebar(
                             "case_notes",
                             "escalations",
                             "refunds",
+                            "disputes",
                             "knowledge_articles",
                         ],
                     ),
