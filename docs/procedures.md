@@ -229,4 +229,5 @@ procedure:
 |------|----|--------|-------|
 | `customer_service_refund.yaml` | `cs_refund` | Customer Service | 8 steps — greet, lookup, eligibility check, refund/deny/cancel, escalate, close |
 | `customer_service_complaint.yaml` | `cs_complaint` | Customer Service | 6 steps — greet, classify, lookup context, resolve, escalate, close |
+| `cs_eft_dispute.yaml` | `cs_eft_dispute` | Customer Service | 9 steps — collect info, lookup, assess eligibility (Reg E tiers), file dispute, provisional credit, deny late/redirect non-EFT, escalate, close |
 | `fraud_ops_alert_triage.yaml` | `fraud_alert_triage` | Fraud Ops | 9 steps — receive alert, review, gather evidence, check devices, assess risk, flag/clear/escalate, document, close |
