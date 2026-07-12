@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         default="sqlite+aiosqlite:///data/workflow.db",
         description="Database connection URL (SQLite for dev, PostgreSQL for production)",
     )
+    adk_session_database_url: str = Field(
+        default="sqlite+aiosqlite:///data/adk_sessions_v2.db",
+        description="ADK 2.x session/event database URL (kept separate from domain data)",
+    )
     db_pool_size: int = Field(default=5, description="Database connection pool size")
     db_max_overflow: int = Field(default=10, description="Max overflow connections")
     db_pool_timeout: int = Field(default=30, description="Pool checkout timeout in seconds")
@@ -63,6 +67,15 @@ class Settings(BaseSettings):
     auth_algorithm: str = Field(default="HS256", description="JWT algorithm")
     auth_token_expire_minutes: int = Field(default=480, description="Token expiry in minutes")
     auth_issuer: str = Field(default="workflow-engine", description="JWT issuer")
+
+    # --- Policy governance ---
+    jurisdiction_profile: str = Field(default="NAM", description="Active jurisdiction profile")
+    policy_signing_key: str = Field(
+        default="dev-policy-signing-key",
+        description="HMAC policy signing key; load from a secret manager in production",
+    )
+    policy_author: str = Field(default="operations-author")
+    policy_approver: str = Field(default="risk-approver")
 
     # --- Rate Limiting ---
     rate_limit_enabled: bool = Field(default=False, description="Enable rate limiting")
@@ -104,6 +117,14 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {valid}")
         return upper
 
+    @model_validator(mode="after")
+    def validate_production_secrets(self):
+        if self.is_production and self.policy_signing_key == "dev-policy-signing-key":
+            raise ValueError("POLICY_SIGNING_KEY must be changed in production")
+        if self.policy_author == self.policy_approver:
+            raise ValueError("Policy author and approver must be different")
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.environment == Environment.PRODUCTION
@@ -122,12 +143,8 @@ class Settings(BaseSettings):
 
     @property
     def adk_session_db_url(self) -> str:
-        """DB URL in the format ADK's DatabaseSessionService expects."""
-        if "sqlite" in self.database_url:
-            path = self.sqlite_path
-            return f"sqlite:///{path}"
-        # For PostgreSQL, ADK needs the sync driver URL
-        return self.database_url.replace("+asyncpg", "")
+        """Async SQLAlchemy URL required by ADK 2.x DatabaseSessionService."""
+        return self.adk_session_database_url
 
 
 @lru_cache()

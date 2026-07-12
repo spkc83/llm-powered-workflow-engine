@@ -4,6 +4,8 @@ from google.adk.agents import Agent
 from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
+from ..settings import get_settings
+from ..tools.catalog import production_safety_instruction, select_model_tools
 from ..tools.fraud_tools import (
     get_fraud_alert,
     get_account_transactions,
@@ -85,12 +87,18 @@ def create_fraud_ops_agent(registry: ProcedureRegistry) -> Agent:
     combined_instructions = "\n---\n\n".join(instruction_parts)
 
     # Resolve tool functions from names
-    tools = []
-    seen = set()
-    for name in sorted(all_tool_names):
-        if name in TOOL_MAP and name not in seen:
-            tools.append(TOOL_MAP[name])
-            seen.add(name)
+    requested_tools = {
+        name: TOOL_MAP[name]
+        for name in all_tool_names
+        if name in TOOL_MAP
+    }
+    production = get_settings().is_production
+    tools = select_model_tools(
+        requested_tools,
+        production=production,
+    )
+    if production:
+        combined_instructions += "\n---\n\n" + production_safety_instruction(requested_tools)
 
     # Build trigger intent keywords for the description
     all_intents = []

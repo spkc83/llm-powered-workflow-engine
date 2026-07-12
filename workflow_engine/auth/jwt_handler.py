@@ -5,7 +5,7 @@ from typing import Optional
 
 import jwt
 
-from .models import Role, TokenPayload, UserContext
+from .models import Role, UserContext
 from .rbac import get_permissions_for_role
 from ..errors import AuthenticationError, ErrorCode
 from ..settings import get_settings

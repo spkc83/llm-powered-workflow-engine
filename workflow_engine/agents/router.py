@@ -3,6 +3,8 @@ from google.adk.agents import Agent
 
 from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
+from ..settings import get_settings
+from ..tools.catalog import select_model_tools
 from ..tools.common_tools import get_knowledge_article
 from .customer_service import create_customer_service_agent
 from .fraud_ops import create_fraud_ops_agent
@@ -63,7 +65,10 @@ Available services:
 - Fraud Operations: Fraud alert triage, suspicious activity investigation
 
 Keep responses friendly, concise, and helpful.""",
-        tools=[get_knowledge_article],
+        tools=select_model_tools(
+            {"get_knowledge_article": get_knowledge_article},
+            production=get_settings().is_production,
+        ),
     )
 
 

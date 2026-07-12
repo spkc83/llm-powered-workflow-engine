@@ -1,7 +1,5 @@
 """Tests for ProcedureRegistry."""
 import pytest
-import tempfile
-from pathlib import Path
 
 from workflow_engine.procedures.registry import ProcedureRegistry
 

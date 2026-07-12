@@ -247,6 +247,32 @@ The `seed_all()` function in `workflow_engine/database/seed.py` populates the da
 
 Seeding is idempotent — running it multiple times will not create duplicates. Time-sensitive tables (orders, transactions, fraud_alerts, disputes) use `INSERT OR REPLACE` so that computed dates stay current on each restart. Static tables use `INSERT OR IGNORE` and count-based guards.
 
-## ADK Session Tables
+## Deterministic core tables
 
-In addition to the business data tables above, ADK's `DatabaseSessionService` creates its own tables in the same database for storing conversation sessions, events, and state. These are managed by ADK and should not be modified directly.
+The SQLite `CoreStore` adapter creates these tables in `DATABASE_URL`:
+
+| Table | Purpose |
+|---|---|
+| `workflow_cases` | Procedure/version lock, customer binding, status, optimistic version |
+| `case_facts` | Typed value, authority, source, evidence, expiry and supersession |
+| `action_attempts` | Unique idempotency key, typed command, lifecycle and connector outcome |
+| `inbox_messages` | Provider-message dedupe and normalized chat/IVR envelope |
+| `handoffs` | Requested/accepted/timed-out/failed/resolved transfer state |
+
+`refunds.order_id` has a unique index. Startup migration retains the earliest
+historical prototype refund per order before creating that index. The action
+record remains the audit source for authorization and reconciliation.
+
+### Database portability
+
+Core logic targets the `CoreStore` protocol. `create_core_store()` supplies the
+SQLite adapter by default and accepts URL-scheme adapter factories for other
+databases. A production adapter must preserve transactions, optimistic compare-
+and-swap, unique idempotency keys, inbox uniqueness, and durable handoff updates.
+
+## ADK 2.x session database
+
+ADK sessions are no longer stored in the domain database. They use
+`ADK_SESSION_DATABASE_URL` (default `data/adk_sessions_v2.db`) because ADK 2.x has
+an async SQLAlchemy schema that is incompatible with the historical 1.9 tables.
+Never treat ADK events or state as the compliance/action authority.

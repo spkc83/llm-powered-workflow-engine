@@ -1,9 +1,8 @@
 """Tests for the database module (init, seed, query helpers)."""
 
 import pytest
-import pytest_asyncio
 
-from workflow_engine.database.db import DB_PATH, execute, init_db, query_all, query_one
+from workflow_engine.database.db import execute, init_db, query_all, query_one
 from workflow_engine.database.seed import seed_all
 
 
