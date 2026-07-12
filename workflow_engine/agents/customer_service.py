@@ -4,6 +4,8 @@ from google.adk.agents import Agent
 from ..config import create_model, get_generate_content_config
 from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
+from ..settings import get_settings
+from ..tools.catalog import production_safety_instruction, select_model_tools
 from ..tools.crm_tools import lookup_order, get_customer_profile, issue_refund, issue_store_credit, update_case_status, search_orders
 from ..tools.common_tools import escalate_to_supervisor, add_case_note, get_knowledge_article
 from ..tools.dispute_tools import lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
@@ -121,12 +123,18 @@ def create_customer_service_agent(registry: ProcedureRegistry) -> Agent:
     combined_instructions = "\n---\n\n".join(instruction_parts)
 
     # Resolve tool functions from names
-    tools = []
-    seen = set()
-    for name in sorted(all_tool_names):
-        if name in TOOL_MAP and name not in seen:
-            tools.append(TOOL_MAP[name])
-            seen.add(name)
+    requested_tools = {
+        name: TOOL_MAP[name]
+        for name in all_tool_names
+        if name in TOOL_MAP
+    }
+    production = get_settings().is_production
+    tools = select_model_tools(
+        requested_tools,
+        production=production,
+    )
+    if production:
+        combined_instructions += "\n---\n\n" + production_safety_instruction(requested_tools)
 
     # Build trigger intent keywords for the description
     all_intents = []

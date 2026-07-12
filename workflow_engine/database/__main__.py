@@ -7,7 +7,6 @@ Usage:
 
 import argparse
 import asyncio
-import sys
 
 from workflow_engine.database.db import DB_PATH, init_db
 from workflow_engine.database.seed import seed_all

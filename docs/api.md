@@ -359,7 +359,7 @@ Health check.
 ```json
 {
   "status": "ok",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "environment": "dev",
   "procedures_loaded": 3,
   "auth_enabled": false
@@ -420,3 +420,75 @@ curl "http://localhost:8000/api/v1/customers?limit=10&offset=0"
 # View operational metrics
 curl "http://localhost:8000/api/v1/metrics"
 ```
+
+---
+
+## Authoritative core-action APIs
+
+### POST /api/v1/core/refunds
+
+Creates or returns an idempotent refund action. This endpoint is the production
+write path; conversational tools cannot bypass it. The authenticated actor must
+be the customer or have `refund:write`, the order is reloaded, ownership and the
+refund window are checked, parameter values are committed as verified facts, and
+the database connector revalidates them before writing the refund.
+
+```json
+{
+  "customer_id": "CUST-456",
+  "order_id": "ORD-123",
+  "reason": "Customer confirmed the item was damaged",
+  "consent_evidence_ref": "chat-message:msg-42"
+}
+```
+
+```json
+{
+  "action_id": "ACT-...",
+  "status": "succeeded",
+  "outcome": {
+    "refund_id": "REF-...",
+    "order_id": "ORD-123",
+    "amount": 79.99,
+    "currency": "USD",
+    "status": "processed"
+  }
+}
+```
+
+Repeating the request for the same order returns the original action and does not
+write another refund. Unknown connector outcomes remain `unknown` until the
+reconciliation worker records `reconciled`, `failed`, or another `unknown` result.
+
+### POST /api/v1/ivr/turns
+
+Normalizes a provider ASR turn into the shared conversation inbox. Stable
+`message_id` values are deduplicated across retries. ASR never creates verified
+facts; low-confidence or interrupted input requires readback.
+
+```json
+{
+  "message_id": "call-123:turn-4",
+  "conversation_id": "call-123",
+  "customer_id": "CUST-456",
+  "transcript": "refund order one two three",
+  "asr_confidence": 0.71,
+  "interrupted": false
+}
+```
+
+```json
+{
+  "accepted": true,
+  "requires_readback": true,
+  "proposed_authority": "asserted"
+}
+```
+
+### Chat/WS dedupe and identity
+
+`POST /api/v1/chat` and WebSocket messages accept an optional stable
+`message_id`. Duplicate IDs are suppressed before ADK execution. `user_id` is
+retained for client compatibility but means the serviced customer, not the JWT
+subject. Sessions are owned by the authenticated actor/customer pair. Production
+WebSockets require a Bearer token during the handshake.

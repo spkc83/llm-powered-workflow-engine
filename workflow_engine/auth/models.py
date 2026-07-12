@@ -14,6 +14,7 @@ class Role(str, Enum):
     CUSTOMER_SERVICE_REP = "customer_service_rep"
     FRAUD_ANALYST = "fraud_analyst"
     READONLY = "readonly"
+    CUSTOMER = "customer"
 
 
 class Permission(str, Enum):

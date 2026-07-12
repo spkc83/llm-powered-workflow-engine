@@ -1,0 +1,17 @@
+# Phase 0 direct-dependency baseline captured from the development environment
+# on 2026-07-12. Transitive dependency hashes remain a follow-up once the
+# supported Python/platform matrix is approved.
+google-adk==2.1.0
+fastapi==0.139.0
+uvicorn==0.46.0
+aiosqlite==0.21.0
+python-dotenv==1.2.2
+pydantic-settings==2.10.1
+PyJWT==2.10.1
+PyYAML==6.0.2
+httpx==0.28.1
+shiny==1.5.1
+z3-solver==4.16.0.0
+sympy==1.14.0
+pytest==8.3.4
+pytest-asyncio==1.1.0

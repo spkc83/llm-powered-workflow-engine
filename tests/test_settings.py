@@ -15,9 +15,21 @@ class TestSettings:
         assert s.is_production is False
 
     def test_is_production_property(self):
-        s = Settings(environment="production", google_api_key="test")
+        s = Settings(
+            environment="production",
+            google_api_key="test",
+            policy_signing_key="production-policy-key",
+        )
         assert s.is_production is True
         assert s.is_dev is False
+
+    def test_production_rejects_default_policy_signing_key(self):
+        with pytest.raises(Exception, match="POLICY_SIGNING_KEY"):
+            Settings(
+                environment="production",
+                google_api_key="test",
+                policy_signing_key="dev-policy-signing-key",
+            )
 
     def test_default_api_prefix(self):
         s = Settings(google_api_key="test")
@@ -29,8 +41,12 @@ class TestSettings:
         assert str(s.sqlite_path) == "data/test.db"
 
     def test_adk_session_db_url(self):
-        s = Settings(database_url="sqlite+aiosqlite:///data/test.db", google_api_key="test")
-        assert s.adk_session_db_url == "sqlite:///data/test.db"
+        s = Settings(
+            database_url="sqlite+aiosqlite:///data/test.db",
+            adk_session_database_url="sqlite+aiosqlite:///data/test-adk-v2.db",
+            google_api_key="test",
+        )
+        assert s.adk_session_db_url == "sqlite+aiosqlite:///data/test-adk-v2.db"
 
     def test_log_level_validation(self):
         s = Settings(log_level="debug", google_api_key="test")

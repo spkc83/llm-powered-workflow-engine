@@ -109,7 +109,7 @@ async def check_device_fingerprint(account_id: str, tool_context: ToolContext) -
         {**d, "trusted": bool(d["trusted"])} for d in devices
     ]
     recent_logins = [
-        {**l, "is_new": bool(l["is_new"])} for l in logins
+        {**login, "is_new": bool(login["is_new"])} for login in logins
     ]
 
     data = {

@@ -1,44 +1,36 @@
 # LLM-Powered Workflow Engine
 
-An enterprise-grade, procedure-driven workflow engine built on [Google ADK](https://google.github.io/adk-docs/) (Agent Development Kit) that uses LLM agents to execute structured business processes. Designed for customer service, fraud operations, and claims workflows at financial institutions.
+A deterministic, omnichannel workflow engine with bounded [Google ADK](https://adk.dev/) 2.1 interaction capabilities. Models propose intent, facts, and wording; typed policy, durable cases, and an independent action gateway control business actions. Designed for customer service, fraud operations, and claims workflows at financial institutions.
 
 Agents follow YAML-defined step-by-step procedures while maintaining natural conversational interaction, with runtime enforcement via a stateful procedure executor.
 
 ## Architecture
 
+```text
+Chat REST/WS + IVR provider webhooks
+                |
+     authenticated actor/customer binding
+                |
+   shared conversation inbox + dedupe
+                |
+      bounded ADK 2.1 interaction layer
+  (intent/fact proposals and response text only)
+                |
+ deterministic procedure router + CoreEngine
+                |
+  durable cases / typed facts / policy package
+                |
+ authorization + idempotent ActionGateway
+                |
+ database connector / internal handoff queue
 ```
-┌──────────────────────┐          ┌──────────────────────────────────┐
-│  Shiny App (UI)      │  httpx   │  FastAPI Backend                 │
-│  Port 8001           │────────→ │  Port 8000                       │
-│                      │          │                                  │
-│  - Chat panel        │          │  API (v1)                        │
-│  - Customer selector │          │  ├── /api/v1/chat (REST + WS)    │
-│  - Session history   │          │  ├── /api/v1/customers           │
-│  - Test scenarios    │          │  ├── /api/v1/sessions            │
-│  - Workflow state    │          │  ├── /api/v1/procedures          │
-│  - Data browser tab  │          │  ├── /api/v1/session/{id}/state  │
-│                      │          │  ├── /api/v1/tables/{name}       │
-└──────────────────────┘          │  ├── /api/v1/ws/chat (WebSocket) │
-                                  │  └── /health                     │
-                                  │                                  │
-                                  │  Middleware Stack                 │
-                                  │  ├── CORS                        │
-                                  │  ├── Correlation ID tracing      │
-                                  │  ├── Rate limiting               │
-                                  │  ├── JWT Authentication          │
-                                  │  └── Structured error handling   │
-                                  └───────────┬────────────────────┘
-                                              │
-                                  ┌───────────▼───────────┐
-                                  │  Database              │
-                                  │  SQLite (dev) /        │
-                                  │  PostgreSQL (prod)     │
-                                  │                        │
-                                  │  - Business data       │
-                                  │  - ADK session tables  │
-                                  │  - Audit trail         │
-                                  └────────────────────────┘
-```
+
+The model and ADK session are never authoritative for consequential actions.
+`CoreEngine` reloads domain records, validates ownership and eligibility, commits
+verified facts, creates an idempotent action, and dispatches it through the action
+gateway. SQLite is the default store; the `CoreStore` protocol supports additional
+database adapters without changing engine semantics. ADK sessions use a separate
+ADK 2.x database.
 
 ### Agent Hierarchy
 
@@ -101,6 +93,12 @@ shiny run app_ui.py --port 8001
 
 Then open http://localhost:8001 in your browser.
 
+## Documentation
+
+See the [documentation index](docs/README.md) for customer/operator guidance,
+chat and IVR contracts, API reference, core architecture, policy governance,
+operations, migration, threat model, security, support, and release notes.
+
 **ADK dev tools** (alternative to the Shiny UI):
 
 ```bash
@@ -143,7 +141,8 @@ pytest tests/ -v
 .
 ├── main.py                         # FastAPI backend — versioned API, middleware, lifecycle
 ├── app_ui.py                       # Shiny for Python chat UI
-├── requirements.txt                # Python dependencies
+├── requirements.txt                # Direct Python dependencies
+├── constraints.txt                 # Pinned Phase 0 direct-dependency baseline
 ├── Dockerfile                      # Multi-stage container build
 ├── docker-compose.yml              # Dev deployment
 ├── docker-compose.prod.yml         # Production overlay
@@ -178,11 +177,12 @@ pytest tests/ -v
 │   │   └── jwt_handler.py          # JWT token creation and verification
 │   │
 │   ├── audit/                      # Compliance audit trail
-│   │   └── logger.py               # Immutable audit logging with DB persistence
+│   │   └── logger.py               # Append-oriented audit logging with DB persistence
 │   │
 │   ├── channels/                   # Omni-channel abstraction
 │   │   ├── base.py                 # Channel interface, InboundMessage, OutboundMessage
-│   │   └── http.py                 # HTTP REST and WebSocket adapters
+│   │   ├── http.py                 # HTTP REST and WebSocket adapters
+│   │   └── ivr.py                  # Provider-neutral IVR/ASR normalization
 │   │
 │   ├── middleware/                  # FastAPI middleware stack
 │   │   ├── auth.py                 # JWT authentication middleware
@@ -195,6 +195,9 @@ pytest tests/ -v
 │   │   ├── fraud_tools.py          # get_fraud_alert, get_account_transactions, check_device_fingerprint, flag_account, submit_sar, close_alert
 │   │   ├── common_tools.py         # escalate_to_supervisor, add_case_note, get_knowledge_article
 │   │   └── dispute_tools.py        # lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
+│   │
+│   ├── core/                       # Cases, facts, policy, routing, gateway, replay, ADK boundary
+│   ├── conversation/               # Chat/IVR inbox, response contracts, handoff lifecycle
 │   │
 │   ├── database/                   # Persistence layer
 │   │   ├── __main__.py             # Standalone DB init: python -m workflow_engine.database [--reset]
@@ -214,11 +217,15 @@ pytest tests/ -v
 │   └── workflow.db
 │
 ├── docs/                           # Documentation
-│   ├── api.md                      # API reference
-│   ├── database.md                 # Schema reference
-│   └── procedures.md               # Procedure authoring guide
+│   ├── api.md                      # API and channel contracts
+│   ├── database.md                 # Business/core/ADK persistence
+│   ├── core-engine.md              # Authority boundaries and invariants
+│   ├── threat-model.md             # Trust assumptions and threats
+│   ├── operations.md               # Deployment, rollout, reconciliation, incidents
+│   ├── migration.md                # ADK 1.9 to 2.1 and core cutover
+│   └── procedures.md               # Procedure and governed-policy authoring
 │
-└── tests/                          # Test suite (356+ tests)
+└── tests/                          # Unit, integration, API, identity, core, replay tests
     ├── test_database.py            # DB init, seed, query helpers
     ├── test_mock_tools.py          # All tool functions (async, uses temp DB)
     ├── test_workflow_state.py      # State tracking logic
@@ -249,10 +256,15 @@ See `.env.example` for the complete reference. Key settings:
 | `ENVIRONMENT` | Runtime environment (`dev`, `staging`, `production`) | `dev` |
 | `GOOGLE_API_KEY` | Google AI API key (required) | — |
 | `LLM_MODEL` | Model name for all agents | `gemini-2.5-flash` |
-| `DATABASE_URL` | Database connection URL | `sqlite+aiosqlite:///data/workflow.db` |
+| `DATABASE_URL` | Domain/core database URL | `sqlite+aiosqlite:///data/workflow.db` |
+| `ADK_SESSION_DATABASE_URL` | Separate ADK 2.x session/event URL | `sqlite+aiosqlite:///data/adk_sessions_v2.db` |
 | `API_PREFIX` | API route prefix | `/api/v1` |
 | `AUTH_ENABLED` | Enable JWT authentication | `false` |
 | `AUTH_SECRET_KEY` | JWT signing secret | dev default |
+| `JURISDICTION_PROFILE` | Active policy jurisdiction profile | `NAM` |
+| `POLICY_SIGNING_KEY` | HMAC policy key; must change in production | dev default |
+| `POLICY_AUTHOR` | Policy author identity | `operations-author` |
+| `POLICY_APPROVER` | Separate policy approver identity | `risk-approver` |
 | `RATE_LIMIT_ENABLED` | Enable request rate limiting | `false` |
 | `LOG_LEVEL` | Logging level | `INFO` |
 | `LOG_FORMAT` | Log format (`text` or `json`) | `text` (dev) / `json` (prod) |
@@ -308,7 +320,9 @@ Auth is disabled by default for development. Enable with `AUTH_ENABLED=true`.
 
 ### Audit Trail
 
-Every compliance-critical action is recorded in an immutable audit trail:
+Every compliance-critical action is recorded in an append-oriented audit trail.
+Production deployments must add database permissions/tamper-evidence controls if
+regulatory immutability is required:
 
 - Refunds issued, accounts flagged, SARs submitted
 - Procedure starts, step transitions, completions
@@ -417,16 +431,18 @@ The engine includes a complete **Regulation E** implementation for electronic fu
 Tools are async Python functions that agents call during workflow execution. Each tool:
 
 1. Queries or mutates the database via the **repository layer**
-2. Logs compliance-critical actions to the **audit trail**
-3. Stores relevant results in `tool_context.state` for use in later steps
-3. Returns a dict that the agent interprets to continue the conversation
+2. Passes runtime permission and customer-binding checks
+3. Routes consequential work through the durable core/action gateway
+4. Logs compliance-critical actions to the **audit trail**
+5. Returns a dict that the agent interprets to continue the conversation
 
 ### Database
 
-Business data is stored in SQLite (dev) or PostgreSQL (production). The database includes:
+Business/core data uses the configured `CoreStore` adapter (SQLite by default).
+ADK 2.x sessions use a separate configured database. Domain/core storage includes:
 
 - Business tables (customers, orders, accounts, transactions, fraud alerts, etc.)
-- ADK session tables (conversation history)
+- Durable case, fact, action, inbox, and handoff tables
 - Audit trail table (immutable compliance log)
 
 See [docs/database.md](docs/database.md) for the full schema reference.
@@ -451,6 +467,8 @@ The API is versioned at `/api/v1`. Legacy routes at `/api/` are maintained for b
 |--------|----------|-------------|
 | `POST` | `/api/v1/chat` | Send a message, get agent response (guardrail-filtered) |
 | `WS` | `/api/v1/ws/chat` | WebSocket for streaming responses (guardrail-filtered) |
+| `POST` | `/api/v1/ivr/turns` | Normalize and deduplicate a final IVR/ASR turn |
+| `POST` | `/api/v1/core/refunds` | Execute an authorized idempotent refund command |
 | `GET` | `/api/v1/customers?limit=&offset=` | List customers (paginated) |
 | `GET` | `/api/v1/sessions?user_id=...` | List sessions for a user |
 | `GET` | `/api/v1/procedures` | List all loaded procedures |

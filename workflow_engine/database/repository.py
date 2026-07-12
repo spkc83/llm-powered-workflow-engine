@@ -123,6 +123,11 @@ class RefundRepository:
             (refund_id, order_id, amount, reason, refund_method, processed_at),
         )
 
+    @staticmethod
+    async def get_by_order(order_id: str) -> Optional[dict]:
+        """Return the single idempotent refund for an order, if present."""
+        return await query_one("SELECT * FROM refunds WHERE order_id = ?", (order_id,))
+
 
 class CaseRepository:
     """Data access for cases and case notes."""
