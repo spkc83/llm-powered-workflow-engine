@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-import builtins
-from typing import Callable, Protocol
+from typing import Callable, List as TypingList, Protocol
 
 import aiosqlite
 
@@ -20,11 +19,12 @@ class PolicyRepository(Protocol):
     async def initialize(self) -> None: ...
     async def save(self, package: PolicyPackage) -> None: ...
     async def get(self, package_id: str) -> PolicyPackage | None: ...
-    async def list(self, lifecycle: PolicyLifecycle | None = None) -> builtins.list[PolicyPackage]: ...
-    async def replace_active(self, active: PolicyPackage, retired: list[PolicyPackage]) -> None: ...
+    async def list(self, lifecycle: PolicyLifecycle | None = None) -> PolicyPackageList: ...
+    async def replace_active(self, active: PolicyPackage, retired: TypingList[PolicyPackage]) -> None: ...
 
 
 PolicyRepositoryFactory = Callable[[str], PolicyRepository]
+PolicyPackageList = TypingList[PolicyPackage]
 
 
 def create_policy_repository(

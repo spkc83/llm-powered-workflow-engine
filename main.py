@@ -59,7 +59,7 @@ from workflow_engine.core import CaseKernel, create_core_store
 from workflow_engine.core.adapter_loading import load_factory
 from workflow_engine.core.connectors import DatabaseRefundConnector
 from workflow_engine.core.domains import OrderSnapshot, RefundDecisionService
-from workflow_engine.core.gateway import ActionGateway
+from workflow_engine.core.gateway import ActionConnector, ActionGateway
 from workflow_engine.core.service import CoreEngine
 from workflow_engine.core.policy import (
     PolicyLifecycle,
@@ -328,6 +328,7 @@ policy_repository = create_policy_repository(_policy_url, adapters=_policy_adapt
 policy_service = PolicyService(policy_repository, policy_signer, policy_registry)
 
 sandbox_action_connector = SQLiteSandboxActionConnector(settings.sandbox_sqlite_path)
+default_action_connector: ActionConnector
 if settings.effective_upstream_mode is UpstreamMode.SANDBOX:
     default_action_connector = sandbox_action_connector
 else:
