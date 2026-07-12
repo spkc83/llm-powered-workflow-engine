@@ -1,9 +1,15 @@
 # Support
 
-For usage questions, defects, and feature requests, open a GitHub issue without
-customer data or secrets. Include version, environment, channel, procedure, minimal
-reproduction, expected/actual behavior, and sanitized logs/correlation IDs.
+For questions, defects, and feature requests, open a GitHub issue with version,
+environment, channel/provider mode, procedure, sanitized reproduction,
+expected/actual behavior, and correlation/message/case/action IDs. Swagger schemas
+are at `/docs`; provider implementation guidance is in
+`docs/integration-guide.md`.
 
-Production incidents involving unauthorized actions, identity crossover, duplicate
-side effects, policy-signature failure, or overdue unknown outcomes should follow
-the security/incident process rather than ordinary support.
+Never attach customer data, secrets, raw audio, DTMF, full transcripts, SAR
+narratives, policy keys, or provider credentials.
+
+Treat unauthorized actions, identity crossover, duplicate provider effects,
+policy-signature failure, sandbox use in production, callback forgery, audit-chain
+failure, secret transcript leakage, or overdue unknown outcomes as security or
+production incidents—not ordinary support requests.

@@ -36,6 +36,13 @@ class TestRolePermissions:
         write_perms = [p for p in perms if "write" in p or "flag" in p or "submit" in p or "create" in p]
         assert len(write_perms) == 0
 
+    def test_integration_identity_is_limited_to_channel_contracts(self):
+        perms = get_permissions_for_role(Role.INTEGRATION)
+        assert Permission.CHANNEL_INGEST.value in perms
+        assert Permission.PROVIDER_CALLBACK.value in perms
+        assert Permission.REFUND_WRITE.value not in perms
+        assert Permission.ADMIN_WRITE.value not in perms
+
 
 class TestUserContext:
     def test_has_permission(self):

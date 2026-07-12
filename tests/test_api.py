@@ -26,6 +26,12 @@ def app():
 
 @pytest_asyncio.fixture
 async def client(app):
+    import main as m
+    await m.core_store.initialize()
+    await m.policy_repository.initialize()
+    for package in m.bootstrap_policies:
+        if await m.policy_repository.get(package.package_id) is None:
+            await m.policy_repository.save(package)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
@@ -265,3 +271,93 @@ class TestIvrEndpoint:
             "proposed_authority": "asserted",
         }
         assert duplicate.json()["accepted"] is False
+
+
+class TestV3IntegrationSurface:
+    @pytest.mark.asyncio
+    async def test_openapi_exposes_v3_adapter_and_operations_contracts(self, client):
+        schema = (await client.get("/openapi.json")).json()
+        paths = schema["paths"]
+        assert "/api/v1/conversations/turns" in paths
+        assert "/api/v1/core/actions" in paths
+        assert "/api/v1/integrations/ivr/stt:transcribe" in paths
+        assert "/api/v1/integrations/ivr/tts:synthesize" in paths
+        assert "/api/v1/integrations/ivr/telephony/events" in paths
+        assert "/api/v1/handoffs" in paths
+        assert "/api/v1/policies" in paths
+        assert "/api/v1/operations/outbox" in paths
+
+    @pytest.mark.asyncio
+    async def test_contract_catalog_publishes_websocket_frame_schemas(self, client):
+        response = await client.get("/api/v1/integrations/contracts")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["websocket_url"] == "/api/v1/ws/chat"
+        assert data["websocket_request_schema"]["title"] == "WebSocketTurnFrame"
+        assert data["websocket_response_schema"]["title"] == "WebSocketResponseFrame"
+
+    @pytest.mark.asyncio
+    async def test_stt_and_tts_development_adapters_are_truthful(self, client):
+        stt = await client.post(
+            "/api/v1/integrations/ivr/stt:transcribe",
+            json={
+                "event_id": "EV-API-1",
+                "call_id": "CALL-API-1",
+                "transcript_hint": "my secret digits",
+                "contains_secret_dtmf": True,
+            },
+        )
+        tts = await client.post(
+            "/api/v1/integrations/ivr/tts:synthesize",
+            json={
+                "request_id": "REQ-API-1",
+                "call_id": "CALL-API-1",
+                "text": "Please confirm the amount",
+            },
+        )
+        assert stt.status_code == 200
+        assert stt.json()["simulated"] is True
+        assert stt.json()["transcript"] == "[REDACTED DTMF]"
+        assert tts.status_code == 200
+        assert tts.json()["simulated"] is True
+
+    @pytest.mark.asyncio
+    async def test_typed_sandbox_action_uses_seeded_authoritative_resource(self, client):
+        resource_id = f"ORD-API-{uuid.uuid4().hex[:8]}"
+        seed = await client.put(
+            "/api/v1/dev/sandbox/resources",
+            json={
+                "resource_type": "order",
+                "resource_id": resource_id,
+                "payload": {
+                    "order_id": resource_id,
+                    "customer_id": "CUST-456",
+                    "amount": 45.0,
+                },
+            },
+        )
+        action = await client.post(
+            "/api/v1/core/actions",
+            json={
+                "case_id": f"CASE-{resource_id}",
+                "customer_id": "CUST-456",
+                "procedure_id": "cs_refund",
+                "procedure_version": "1.0.0",
+                "policy_package_id": "refund@1.0.0:NAM",
+                "idempotency_key": f"store-credit:{resource_id}",
+                "resource": {"resource_type": "order", "resource_id": resource_id},
+                "payload": {
+                    "action": "issue_store_credit",
+                    "order_id": resource_id,
+                    "customer_id": "CUST-456",
+                    "amount": 45.0,
+                    "currency": "USD",
+                    "reason": "outside refund window",
+                },
+                "consent_evidence_ref": "message:consent-api",
+            },
+        )
+        assert seed.status_code == 200
+        assert action.status_code == 200
+        assert action.json()["status"] == "succeeded"
+        assert action.json()["outcome"]["simulated"] is True
