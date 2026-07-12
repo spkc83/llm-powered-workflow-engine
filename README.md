@@ -11,18 +11,18 @@ Chat REST/WS + IVR provider webhooks
                 |
      authenticated actor/customer binding
                 |
-   shared conversation inbox + dedupe
+ shared conversation inbox + ordering quarantine
                 |
-      bounded ADK 2.1 interaction layer
+      bounded ADK 2.4 interaction layer
   (intent/fact proposals and response text only)
                 |
  deterministic procedure router + CoreEngine
                 |
   durable cases / typed facts / policy package
                 |
- authorization + idempotent ActionGateway
+ authorization + atomic outbox + ActionGateway
                 |
- database connector / internal handoff queue
+ provider adapter / sandbox / human queue
 ```
 
 The model and ADK session are never authoritative for consequential actions.
@@ -31,6 +31,12 @@ verified facts, creates an idempotent action, and dispatches it through the acti
 gateway. SQLite is the default store; the `CoreStore` protocol supports additional
 database adapters without changing engine semantics. ADK sessions use a separate
 ADK 2.x database.
+
+v3 includes provider-neutral STT, TTS, telephony, chat-delivery, action, and
+human-agent ports. Development uses truthful SQLite sandbox adapters; production
+defaults to disabled and rejects sandbox mode. Swagger UI at
+<http://localhost:8000/docs> contains live request schemas and examples. See the
+[upstream integration guide](docs/integration-guide.md).
 
 ### Agent Hierarchy
 
@@ -51,7 +57,7 @@ router_agent (configurable — default: Gemini 2.5 Flash)
     └── Tools: get_knowledge_article
 ```
 
-The **router agent** examines user intent and delegates to the appropriate specialist. Each specialist agent receives procedure-derived instructions that guide it through a structured workflow while maintaining natural conversation.
+The **router agent** examines user intent and delegates to the appropriate specialist. Each specialist receives procedure guidance. Consequential tool names shown above are proposal/legacy development surfaces and remain frozen for production model execution; real effects use the typed action service and independent gateway.
 
 ## Quick Start
 
@@ -190,14 +196,15 @@ pytest tests/ -v
 │   │   ├── error_handler.py        # Structured error responses
 │   │   └── rate_limiter.py         # In-memory rate limiting
 │   │
-│   ├── tools/                      # Tool implementations (async, SQLite-backed)
+│   ├── tools/                      # Classified model read/proposal tools; production writes frozen
 │   │   ├── crm_tools.py            # lookup_order, search_orders, get_customer_profile, issue_refund, issue_store_credit, update_case_status
 │   │   ├── fraud_tools.py          # get_fraud_alert, get_account_transactions, check_device_fingerprint, flag_account, submit_sar, close_alert
 │   │   ├── common_tools.py         # escalate_to_supervisor, add_case_note, get_knowledge_article
 │   │   └── dispute_tools.py        # lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
 │   │
-│   ├── core/                       # Cases, facts, policy, routing, gateway, replay, ADK boundary
-│   ├── conversation/               # Chat/IVR inbox, response contracts, handoff lifecycle
+│   ├── core/                       # Cases, facts, policy, outbox, workers, action gateway
+│   ├── conversation/               # Shared chat/IVR service, inbox, response/handoff contracts
+│   ├── integrations/               # Provider ports and truthful SQLite dev adapters
 │   │
 │   ├── database/                   # Persistence layer
 │   │   ├── __main__.py             # Standalone DB init: python -m workflow_engine.database [--reset]
@@ -218,11 +225,12 @@ pytest tests/ -v
 │
 ├── docs/                           # Documentation
 │   ├── api.md                      # API and channel contracts
+│   ├── integration-guide.md        # Provider ports, callbacks, conformance
 │   ├── database.md                 # Business/core/ADK persistence
 │   ├── core-engine.md              # Authority boundaries and invariants
 │   ├── threat-model.md             # Trust assumptions and threats
 │   ├── operations.md               # Deployment, rollout, reconciliation, incidents
-│   ├── migration.md                # ADK 1.9 to 2.1 and core cutover
+│   ├── migration.md                # v2 to v3 control-plane migration
 │   └── procedures.md               # Procedure and governed-policy authoring
 │
 └── tests/                          # Unit, integration, API, identity, core, replay tests
@@ -258,6 +266,11 @@ See `.env.example` for the complete reference. Key settings:
 | `LLM_MODEL` | Model name for all agents | `gemini-2.5-flash` |
 | `DATABASE_URL` | Domain/core database URL | `sqlite+aiosqlite:///data/workflow.db` |
 | `ADK_SESSION_DATABASE_URL` | Separate ADK 2.x session/event URL | `sqlite+aiosqlite:///data/adk_sessions_v2.db` |
+| `POLICY_DATABASE_URL` | Durable policy repository URL; defaults to domain DB | `DATABASE_URL` |
+| `UPSTREAM_MODE` | `disabled`, `sandbox`, or deployment-wired `provider` | sandbox in dev; disabled elsewhere |
+| `SANDBOX_DATABASE_URL` | Development upstream emulator | `sqlite+aiosqlite:///data/upstream_sandbox.db` |
+| `JURISDICTION_PROFILE` | Operational jurisdiction profile | `NAM` |
+| `JURISDICTION_CONFIG_PATH` | Counsel-approved YAML/JSON profile override | — |
 | `API_PREFIX` | API route prefix | `/api/v1` |
 | `AUTH_ENABLED` | Enable JWT authentication | `false` |
 | `AUTH_SECRET_KEY` | JWT signing secret | dev default |

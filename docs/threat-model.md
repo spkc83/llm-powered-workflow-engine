@@ -1,55 +1,59 @@
-# Phase 0 Trust and Threat Model
+# v3 Trust and Threat Model
 
-This document defines the initial trust boundary for the modernization plan. It
-describes current constraints; it does not claim that the prototype is ready for
-consequential production actions.
+## Safety claim
 
-## Target safety claim
+Model, prompt, tool arguments, channel payloads, ADK state, and generated summaries
+are attacker-influenced proposals. They cannot independently authorize a
+consequential effect. The deterministic kernel requires authenticated actor/customer
+binding, permission, active signed policy, authoritative fact provenance,
+consent/approval, stable idempotency, and connector outcome evidence.
 
-Model, prompt, ADK session, and callback output may propose facts or actions, but
-cannot independently authorize a consequential business action. Consequential
-tools remain unavailable to production model agents until an action gateway
-enforces typed authorization, verified parameter provenance, consent or approval,
-idempotency, and outcome reconciliation.
+## Trusted boundaries
 
-## Trusted components and identities
+- JWT validation/RBAC and serviced-customer delegation;
+- deterministic core and signed active policy registry;
+- conforming `CoreStore`/`PolicyRepository` transaction semantics;
+- authenticated upstream adapters and their authoritative resource reloads;
+- secret manager, signing keys, provider credentials, and approved operators.
 
-- The authenticated actor is the JWT subject and role produced by the auth layer.
-- The serviced customer is a separate identity selected by the current operator
-  UI and carried in the request as `user_id`.
-- Database records are authoritative only when reloaded inside a deterministic
-  command or decision boundary; mutable ADK session state is not authoritative.
-- Connector credentials, policy signing keys, and approval identities must remain
-  outside model-visible state and prompts.
-- The model, prompt text, tool arguments, attachments, channel payloads, and ADK
-  resume events are treated as attacker-influenced inputs.
+ADK sessions, model callbacks, transcripts, attachments, provider webhooks, sandbox
+payloads, and mutable client fields are not trusted.
 
-## Primary threats
+## Threats and controls
 
-| Threat | Current exposure | Phase 0 control |
-| --- | --- | --- |
-| Prompt injection invokes a write tool | Domain agents expose broad tool unions | `workflow_engine.tools.catalog` classifies all exposed tools and removes consequential tools from production agents. |
-| Unclassified tool is added silently | Tool maps and YAML can evolve independently | Catalog coverage tests fail when model-exposed tool names and inventory diverge. |
-| Duplicate or resumed action repeats a side effect | Current write tools lack stable business idempotency keys | Inventory records idempotency as not implemented; those tools remain production-disabled. |
-| Mutable session data supplies action parameters | Refund and credit tools read amounts/payment details from session state | Production model access is frozen pending transactional reload and an action gateway. |
-| Actor impersonates a customer | REST/WS payload `user_id` is currently trusted as customer/session identity | Not resolved in this slice; authenticated actor/customer delegation and tenant binding are required before production chat is enabled. |
-| REST and WS apply different auth/safety semantics | HTTP middleware does not establish equivalent WS identity and WS uses a reduced guardrail path | Consequential WS tools are frozen; a shared conversation service remains required. |
-| External action succeeds with an ambiguous response | No requested/authorized/dispatched/unknown/reconciled lifecycle exists | Consequential actions remain production-disabled until Phase 1 implements lifecycle and reconciliation. |
+| Threat | v3 control |
+|---|---|
+| Prompt injection invokes a write | Consequential model tools remain frozen; typed action service/gateway is independent. |
+| Client calls action with invented amount | Authoritative resource adapter reload and exact fact/parameter match. |
+| Duplicate/resumed provider effect | Unique business idempotency, atomic action/outbox insertion, provider key reuse. |
+| Timeout after provider commit | `unknown` state and query-only reconciliation; never blind redispatch. |
+| Two workers dispatch once | Atomic action claim and leased outbox. |
+| Provider message-ID collision | Composite `(provider_id,message_id)` identity. |
+| Out-of-order channel state | Durable sequence gap quarantine before ADK/action processing. |
+| REST/WS safety drift | One `ConversationService`; WS buffers full safety verdict. |
+| Low-confidence speech authorizes action | ASR stays asserted and requires readback/authoritative promotion. |
+| Secret DTMF/transcript leakage | Secure collection requirement and stub redaction; adapters must redact before logs/storage. |
+| False human connection | Validated requested/queued/accepted/connected lifecycle. |
+| Policy tampering or restart loss | Durable canonical signed packages, key ID, one active version constraint. |
+| Sandbox in production | Production settings reject sandbox; disabled adapters return `503`. |
+| Audit modification | Append-order hash-chain verification plus required immutable backup/external anchoring. |
+| Cross-customer session | Actor/customer composite ownership and delegation permission checks. |
+| Client spoofs provider namespace | Only admin/integration identities retain supplied provider IDs; direct clients receive a server namespace. |
 
-## Current production safety freeze
+## Residual risks
 
-The catalog permits model exposure only for classified non-consequential reads in
-the production environment. This is containment, not authorization: the read
-functions still need endpoint/actor permission enforcement and tenant/customer
-binding before a production release.
+- The built-in NAM profile is not legal advice and requires sub-jurisdiction review.
+- A local hash chain cannot prove that a tail was deleted without external anchoring.
+- Provider truth is only as strong as callback authentication, query semantics, and
+  conformance testing.
+- SQLite is the reference adapter; multi-instance production stores need their own
+  concurrency conformance evidence.
+- Legacy dev action functions remain non-production surfaces; production model
+  exposure stays frozen.
 
-## Required follow-ups
+## Production gate
 
-1. Define a canonical `ActorContext` and `CustomerContext`, tenant binding, staff
-   delegation rules, customer self-service claims, and step-up assurance.
-2. Authenticate WebSocket handshakes and make REST/WS use the same turn pipeline.
-3. Implement the refund vertical slice with transactional ownership/eligibility
-   reload, procedure/evidence references, stable idempotency, and reconciliation.
-4. Replace direct model write tools with narrow action-gateway command DTOs.
-5. Produce a fully resolved, hash-locked dependency set for each supported runtime
-   platform before release.
+Do not enable a provider/action until callback authentication, redaction, duplicate,
+ordering, pre/post-commit timeout, reconciliation, outage, recovery, and rollback
+cases pass. Require zero unauthorized actions in the versioned adversarial corpus
+and explicit owner acceptance of jurisdiction, retention, queue, and error budgets.

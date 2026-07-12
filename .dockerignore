@@ -7,6 +7,8 @@
 __pycache__
 *.pyc
 data/workflow.db
+data/adk_sessions_v2.db
+data/upstream_sandbox.db
 *.md
 !README.md
 !docs/*.md

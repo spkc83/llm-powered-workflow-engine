@@ -6,7 +6,7 @@ changing policy, conversation, or action semantics.
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -14,12 +14,22 @@ from typing import Any, Callable, Protocol
 import aiosqlite
 from pydantic import BaseModel, Field
 
+from workflow_engine.core.action_specs import ACTION_SPECIFICATIONS
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 class CaseConflict(RuntimeError):
+    pass
+
+
+class ActionConflict(RuntimeError):
+    pass
+
+
+class HandoffConflict(RuntimeError):
     pass
 
 
@@ -46,6 +56,14 @@ class ActionStatus(str, Enum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     RECONCILED = "reconciled"
+
+
+class OutboxStatus(str, Enum):
+    PENDING = "pending"
+    LEASED = "leased"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    QUARANTINED = "quarantined"
 
 
 class CaseRecord(BaseModel):
@@ -83,6 +101,7 @@ class ActionCommand(BaseModel):
     required_fact_authority: dict[str, FactAuthority]
     consent_evidence_ref: str | None = None
     approval_evidence_ref: str | None = None
+    policy_activation_signature: str | None = None
 
 
 class ActionRecord(BaseModel):
@@ -90,6 +109,21 @@ class ActionRecord(BaseModel):
     command: ActionCommand
     status: ActionStatus
     outcome: dict[str, Any] | None = None
+    created_at: str
+    updated_at: str
+
+
+class OutboxRecord(BaseModel):
+    outbox_id: str
+    topic: str
+    aggregate_id: str
+    payload: dict[str, Any]
+    status: OutboxStatus
+    attempts: int = 0
+    available_at: str
+    lease_owner: str | None = None
+    lease_until: str | None = None
+    last_error: str | None = None
     created_at: str
     updated_at: str
 
@@ -102,12 +136,24 @@ class CoreStore(Protocol):
     async def get_fact(self, case_id: str, name: str) -> FactRecord | None: ...
     async def insert_action(self, record: ActionRecord, expected_version: int) -> ActionRecord: ...
     async def get_action_by_key(self, key: str) -> ActionRecord | None: ...
+    async def get_action(self, action_id: str) -> ActionRecord | None: ...
+    async def list_actions(self, status: ActionStatus | None = None, limit: int = 100) -> list[ActionRecord]: ...
+    async def list_action_events(self, action_id: str) -> list[dict[str, Any]]: ...
     async def update_action(self, action_id: str, status: ActionStatus, outcome: dict | None) -> ActionRecord: ...
+    async def transition_action(self, action_id: str, expected: ActionStatus, status: ActionStatus, outcome: dict | None) -> ActionRecord: ...
     async def claim_action(self, action_id: str) -> tuple[ActionRecord, bool]: ...
+    async def enqueue_outbox(self, topic: str, aggregate_id: str, payload: dict[str, Any]) -> OutboxRecord: ...
+    async def claim_outbox(self, owner: str, lease_seconds: int, limit: int = 10) -> list[OutboxRecord]: ...
+    async def complete_outbox(self, outbox_id: str) -> OutboxRecord: ...
+    async def fail_outbox(self, outbox_id: str, error: str, retry_at: str | None, quarantine: bool = False) -> OutboxRecord: ...
+    async def list_outbox(self, status: OutboxStatus | None = None, limit: int = 100) -> list[OutboxRecord]: ...
     async def accept_message(self, envelope: dict[str, Any]) -> bool: ...
+    async def accept_message_result(self, envelope: dict[str, Any]) -> dict[str, Any]: ...
+    async def list_quarantined_messages(self, limit: int = 100) -> list[dict[str, Any]]: ...
     async def create_handoff(self, record: dict[str, Any]) -> None: ...
     async def get_handoff(self, handoff_id: str) -> dict[str, Any] | None: ...
     async def update_handoff(self, handoff_id: str, status: str, agent_id: str | None) -> dict[str, Any]: ...
+    async def transition_handoff(self, handoff_id: str, expected: str, status: str, agent_id: str | None) -> dict[str, Any]: ...
 
 
 class SQLiteCoreStore:
@@ -117,10 +163,14 @@ class SQLiteCoreStore:
         self.path = str(path)
 
     async def initialize(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(
                 """
                 PRAGMA foreign_keys=ON;
+                CREATE TABLE IF NOT EXISTS core_migrations (
+                    name TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS workflow_cases (
                     case_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL,
                     procedure_id TEXT NOT NULL, procedure_version TEXT NOT NULL,
@@ -139,9 +189,39 @@ class SQLiteCoreStore:
                     outcome_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     FOREIGN KEY(case_id) REFERENCES workflow_cases(case_id)
                 );
+                CREATE TABLE IF NOT EXISTS action_events (
+                    event_id TEXT PRIMARY KEY, action_id TEXT NOT NULL,
+                    status TEXT NOT NULL, details_json TEXT, recorded_at TEXT NOT NULL,
+                    FOREIGN KEY(action_id) REFERENCES action_attempts(action_id)
+                );
                 CREATE TABLE IF NOT EXISTS inbox_messages (
                     message_id TEXT PRIMARY KEY, envelope_json TEXT NOT NULL, received_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS conversation_inbox (
+                    provider_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    envelope_json TEXT NOT NULL, received_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, message_id)
+                );
+                CREATE TABLE IF NOT EXISTS conversation_inbox_v3 (
+                    provider_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL, sequence INTEGER,
+                    envelope_json TEXT NOT NULL, ordering_status TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, message_id)
+                );
+                CREATE TABLE IF NOT EXISTS conversation_sequences (
+                    provider_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+                    last_sequence INTEGER NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(provider_id, conversation_id)
+                );
+                CREATE TABLE IF NOT EXISTS core_outbox (
+                    outbox_id TEXT PRIMARY KEY, topic TEXT NOT NULL, aggregate_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
+                    available_at TEXT NOT NULL, lease_owner TEXT, lease_until TEXT, last_error TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_core_outbox_claim
+                    ON core_outbox(status, available_at, lease_until);
                 CREATE TABLE IF NOT EXISTS handoffs (
                     handoff_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, case_id TEXT NOT NULL,
                     context_json TEXT NOT NULL, status TEXT NOT NULL, assigned_agent_id TEXT,
@@ -149,6 +229,47 @@ class SQLiteCoreStore:
                 );
                 """
             )
+            await db.execute("BEGIN IMMEDIATE")
+            migration = await (await db.execute(
+                "SELECT 1 FROM core_migrations WHERE name='action_events_v3_backfill'"
+            )).fetchone()
+            if migration is None:
+                # Backfill append evidence for pre-v3 actions. Exact historical
+                # timestamps were not recorded, so reconstructed events are marked.
+                legacy_actions = await (await db.execute(
+                    """SELECT a.action_id,a.status,a.created_at,a.updated_at
+                    FROM action_attempts a LEFT JOIN action_events e
+                      ON e.action_id=a.action_id WHERE e.action_id IS NULL"""
+                )).fetchall()
+                terminal = {
+                    ActionStatus.SUCCEEDED.value,
+                    ActionStatus.FAILED.value,
+                    ActionStatus.UNKNOWN.value,
+                    ActionStatus.RECONCILED.value,
+                }
+                for action_id, status, created_at, updated_at in legacy_actions:
+                    sequence = [ActionStatus.REQUESTED.value]
+                    if status != ActionStatus.REQUESTED.value:
+                        sequence.append(ActionStatus.AUTHORIZED.value)
+                    if status in {ActionStatus.DISPATCHED.value, *terminal}:
+                        sequence.append(ActionStatus.DISPATCHED.value)
+                    if status == ActionStatus.RECONCILED.value:
+                        sequence.append(ActionStatus.UNKNOWN.value)
+                    if status in terminal:
+                        sequence.append(status)
+                    for event_status in sequence:
+                        await db.execute(
+                            "INSERT INTO action_events VALUES (?,?,?,?,?)",
+                            (
+                                f"AEV-{uuid.uuid4().hex}", action_id, event_status,
+                                json.dumps({"migrated": True}),
+                                updated_at if event_status == status else created_at,
+                            ),
+                        )
+                await db.execute(
+                    "INSERT INTO core_migrations VALUES (?,?)",
+                    ("action_events_v3_backfill", _now()),
+                )
             await db.commit()
 
     async def create_case(self, record: CaseRecord) -> None:
@@ -225,6 +346,23 @@ class SQLiteCoreStore:
                     record.created_at, record.updated_at,
                 ),
             )
+            for status in (ActionStatus.REQUESTED, ActionStatus.AUTHORIZED):
+                await db.execute(
+                    "INSERT INTO action_events VALUES (?,?,?,?,?)",
+                    (
+                        f"AEV-{uuid.uuid4().hex}", record.action_id, status.value,
+                        None, _now(),
+                    ),
+                )
+            now = _now()
+            await db.execute(
+                "INSERT INTO core_outbox VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"OUT-{uuid.uuid4().hex}", "action.dispatch", record.action_id,
+                    json.dumps({"action_id": record.action_id}), OutboxStatus.PENDING.value,
+                    0, now, None, None, None, now, now,
+                ),
+            )
             await db.commit()
         return record
 
@@ -236,11 +374,62 @@ class SQLiteCoreStore:
             )).fetchone()
             return self._action_from_row(dict(row)) if row else None
 
+    async def get_action(self, action_id: str) -> ActionRecord | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM action_attempts WHERE action_id=?", (action_id,)
+            )).fetchone()
+            return self._action_from_row(dict(row)) if row else None
+
+    async def list_actions(
+        self, status: ActionStatus | None = None, limit: int = 100
+    ) -> list[ActionRecord]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            if status is None:
+                cursor = await db.execute(
+                    "SELECT * FROM action_attempts ORDER BY created_at LIMIT ?", (limit,)
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM action_attempts WHERE status=? ORDER BY created_at LIMIT ?",
+                    (status.value, limit),
+                )
+            return [self._action_from_row(dict(row)) for row in await cursor.fetchall()]
+
+    async def list_action_events(self, action_id: str) -> list[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                """SELECT event_id,action_id,status,details_json,recorded_at
+                FROM action_events WHERE action_id=? ORDER BY rowid""",
+                (action_id,),
+            )).fetchall()
+        events = []
+        for row in rows:
+            event = dict(row)
+            details_json = event.pop("details_json")
+            event["details"] = json.loads(details_json) if details_json else None
+            events.append(event)
+        return events
+
     async def update_action(self, action_id: str, status: ActionStatus, outcome: dict | None) -> ActionRecord:
         async with aiosqlite.connect(self.path) as db:
-            await db.execute(
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
                 "UPDATE action_attempts SET status=?, outcome_json=?, updated_at=? WHERE action_id=?",
                 (status.value, json.dumps(outcome) if outcome is not None else None, _now(), action_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise KeyError(action_id)
+            await db.execute(
+                "INSERT INTO action_events VALUES (?,?,?,?,?)",
+                (
+                    f"AEV-{uuid.uuid4().hex}", action_id, status.value,
+                    json.dumps(outcome) if outcome is not None else None, _now(),
+                ),
             )
             await db.commit()
             db.row_factory = aiosqlite.Row
@@ -249,16 +438,65 @@ class SQLiteCoreStore:
                 raise KeyError(action_id)
             return self._action_from_row(dict(row))
 
+    async def transition_action(
+        self,
+        action_id: str,
+        expected: ActionStatus,
+        status: ActionStatus,
+        outcome: dict | None,
+    ) -> ActionRecord:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """UPDATE action_attempts SET status=?, outcome_json=?, updated_at=?
+                WHERE action_id=? AND status=?""",
+                (
+                    status.value,
+                    json.dumps(outcome) if outcome is not None else None,
+                    _now(),
+                    action_id,
+                    expected.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise ActionConflict(
+                    f"Action {action_id} transition conflict from {expected.value}"
+                )
+            await db.execute(
+                "INSERT INTO action_events VALUES (?,?,?,?,?)",
+                (
+                    f"AEV-{uuid.uuid4().hex}", action_id, status.value,
+                    json.dumps(outcome) if outcome is not None else None, _now(),
+                ),
+            )
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM action_attempts WHERE action_id=?", (action_id,)
+            )).fetchone()
+            assert row is not None
+            return self._action_from_row(dict(row))
+
     async def claim_action(self, action_id: str) -> tuple[ActionRecord, bool]:
         """Atomically move one authorized action to dispatched."""
         async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
                 """UPDATE action_attempts SET status=?, updated_at=?
                 WHERE action_id=? AND status=?""",
                 (ActionStatus.DISPATCHED.value, _now(), action_id, ActionStatus.AUTHORIZED.value),
             )
-            await db.commit()
             claimed = cursor.rowcount == 1
+            if claimed:
+                await db.execute(
+                    "INSERT INTO action_events VALUES (?,?,?,?,?)",
+                    (
+                        f"AEV-{uuid.uuid4().hex}", action_id,
+                        ActionStatus.DISPATCHED.value, None, _now(),
+                    ),
+                )
+            await db.commit()
             db.row_factory = aiosqlite.Row
             row = await (await db.execute(
                 "SELECT * FROM action_attempts WHERE action_id=?", (action_id,)
@@ -277,19 +515,212 @@ class SQLiteCoreStore:
         )
 
     async def accept_message(self, envelope: dict[str, Any]) -> bool:
+        return bool((await self.accept_message_result(envelope))["accepted"])
+
+    async def accept_message_result(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        provider_id = envelope.get("provider_id", "local")
+        message_id = envelope["message_id"]
+        conversation_id = envelope.get("conversation_id", "")
+        sequence = envelope.get("sequence")
         async with aiosqlite.connect(self.path) as db:
-            try:
+            await db.execute("BEGIN IMMEDIATE")
+            existing = await (await db.execute(
+                """SELECT ordering_status,sequence FROM conversation_inbox_v3
+                WHERE provider_id=? AND message_id=?""",
+                (provider_id, message_id),
+            )).fetchone()
+            if existing and existing[0] != "quarantined":
+                await db.rollback()
+                return {"accepted": False, "status": "duplicate", "reason": "message_id"}
+
+            ordering_status = "accepted"
+            reason = None
+            if sequence is not None:
+                row = await (await db.execute(
+                    """SELECT last_sequence FROM conversation_sequences
+                    WHERE provider_id=? AND conversation_id=?""",
+                    (provider_id, conversation_id),
+                )).fetchone()
+                last_sequence = row[0] if row else None
+                if last_sequence is not None and sequence <= last_sequence:
+                    await db.rollback()
+                    return {
+                        "accepted": False,
+                        "status": "duplicate",
+                        "reason": "sequence_already_processed",
+                    }
+                if last_sequence is not None and sequence > last_sequence + 1:
+                    ordering_status = "quarantined"
+                    reason = f"sequence_gap:expected={last_sequence + 1}:received={sequence}"
+
+            if existing:
                 await db.execute(
-                    "INSERT INTO inbox_messages VALUES (?, ?, ?)",
-                    (envelope["message_id"], json.dumps(envelope), _now()),
+                    """UPDATE conversation_inbox_v3 SET envelope_json=?,ordering_status=?,
+                    received_at=? WHERE provider_id=? AND message_id=?""",
+                    (
+                        json.dumps(envelope), ordering_status, _now(), provider_id, message_id,
+                    ),
                 )
-                await db.commit()
-                return True
-            except aiosqlite.IntegrityError:
-                return False
+            else:
+                await db.execute(
+                    "INSERT INTO conversation_inbox_v3 VALUES (?,?,?,?,?,?,?)",
+                    (
+                        provider_id, message_id, conversation_id, sequence,
+                        json.dumps(envelope), ordering_status, _now(),
+                    ),
+                )
+            if ordering_status == "accepted" and sequence is not None:
+                await db.execute(
+                    """INSERT INTO conversation_sequences VALUES (?,?,?,?)
+                    ON CONFLICT(provider_id,conversation_id) DO UPDATE SET
+                    last_sequence=excluded.last_sequence,updated_at=excluded.updated_at""",
+                    (provider_id, conversation_id, sequence, _now()),
+                )
+            await db.commit()
+            return {
+                "accepted": ordering_status == "accepted",
+                "status": ordering_status,
+                "reason": reason,
+            }
+
+    async def list_quarantined_messages(self, limit: int = 100) -> list[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                """SELECT * FROM conversation_inbox_v3 WHERE ordering_status='quarantined'
+                ORDER BY received_at LIMIT ?""",
+                (limit,),
+            )).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["envelope"] = json.loads(data.pop("envelope_json"))
+            result.append(data)
+        return result
+
+    async def enqueue_outbox(
+        self, topic: str, aggregate_id: str, payload: dict[str, Any]
+    ) -> OutboxRecord:
+        now = _now()
+        record = OutboxRecord(
+            outbox_id=f"OUT-{uuid.uuid4().hex}", topic=topic, aggregate_id=aggregate_id,
+            payload=payload, status=OutboxStatus.PENDING, available_at=now,
+            created_at=now, updated_at=now,
+        )
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO core_outbox VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record.outbox_id, record.topic, record.aggregate_id, json.dumps(record.payload),
+                    record.status.value, record.attempts, record.available_at, None, None, None,
+                    record.created_at, record.updated_at,
+                ),
+            )
+            await db.commit()
+        return record
+
+    async def claim_outbox(
+        self, owner: str, lease_seconds: int, limit: int = 10
+    ) -> list[OutboxRecord]:
+        """Lease due records with SQLite-compatible compare-and-set locking."""
+        now = _now()
+        lease_until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            rows = await (await db.execute(
+                """SELECT outbox_id FROM core_outbox
+                WHERE available_at <= ? AND (
+                    status IN (?, ?) OR (status=? AND lease_until < ?)
+                ) ORDER BY created_at LIMIT ?""",
+                (
+                    now, OutboxStatus.PENDING.value, OutboxStatus.FAILED.value,
+                    OutboxStatus.LEASED.value, now, limit,
+                ),
+            )).fetchall()
+            ids = [row["outbox_id"] for row in rows]
+            for outbox_id in ids:
+                await db.execute(
+                    """UPDATE core_outbox SET status=?, lease_owner=?, lease_until=?,
+                    attempts=attempts+1, updated_at=? WHERE outbox_id=?""",
+                    (OutboxStatus.LEASED.value, owner, lease_until, now, outbox_id),
+                )
+            await db.commit()
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            claimed = await (await db.execute(
+                f"SELECT * FROM core_outbox WHERE outbox_id IN ({placeholders})", ids
+            )).fetchall()
+            return [self._outbox_from_row(dict(row)) for row in claimed]
+
+    async def complete_outbox(self, outbox_id: str) -> OutboxRecord:
+        return await self._update_outbox(
+            outbox_id, OutboxStatus.DELIVERED, retry_at=None, error=None
+        )
+
+    async def fail_outbox(
+        self,
+        outbox_id: str,
+        error: str,
+        retry_at: str | None,
+        quarantine: bool = False,
+    ) -> OutboxRecord:
+        status = OutboxStatus.QUARANTINED if quarantine else OutboxStatus.FAILED
+        return await self._update_outbox(outbox_id, status, retry_at=retry_at, error=error)
+
+    async def _update_outbox(
+        self,
+        outbox_id: str,
+        status: OutboxStatus,
+        retry_at: str | None,
+        error: str | None,
+    ) -> OutboxRecord:
+        now = _now()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """UPDATE core_outbox SET status=?, available_at=?, lease_owner=NULL,
+                lease_until=NULL, last_error=?, updated_at=? WHERE outbox_id=?""",
+                (status.value, retry_at or now, error, now, outbox_id),
+            )
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM core_outbox WHERE outbox_id=?", (outbox_id,)
+            )).fetchone()
+        if not row:
+            raise KeyError(outbox_id)
+        return self._outbox_from_row(dict(row))
+
+    async def list_outbox(
+        self, status: OutboxStatus | None = None, limit: int = 100
+    ) -> list[OutboxRecord]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            if status is None:
+                cursor = await db.execute(
+                    "SELECT * FROM core_outbox ORDER BY created_at LIMIT ?", (limit,)
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM core_outbox WHERE status=? ORDER BY created_at LIMIT ?",
+                    (status.value, limit),
+                )
+            return [self._outbox_from_row(dict(row)) for row in await cursor.fetchall()]
+
+    @staticmethod
+    def _outbox_from_row(row: dict[str, Any]) -> OutboxRecord:
+        data = dict(row)
+        data["payload"] = json.loads(data.pop("payload_json"))
+        return OutboxRecord(**data)
 
     async def create_handoff(self, record: dict[str, Any]) -> None:
         async with aiosqlite.connect(self.path) as db:
+            case = await (await db.execute(
+                "SELECT 1 FROM workflow_cases WHERE case_id=?", (record["case_id"],)
+            )).fetchone()
+            if case is None:
+                raise KeyError(record["case_id"])
             await db.execute(
                 "INSERT INTO handoffs VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -322,6 +753,28 @@ class SQLiteCoreStore:
             raise KeyError(handoff_id)
         return result
 
+    async def transition_handoff(
+        self,
+        handoff_id: str,
+        expected: str,
+        status: str,
+        agent_id: str | None,
+    ) -> dict[str, Any]:
+        async with aiosqlite.connect(self.path) as db:
+            cursor = await db.execute(
+                """UPDATE handoffs SET status=?,assigned_agent_id=?,updated_at=?
+                WHERE handoff_id=? AND status=?""",
+                (status, agent_id, _now(), handoff_id, expected),
+            )
+            await db.commit()
+            if cursor.rowcount != 1:
+                raise HandoffConflict(
+                    f"Handoff {handoff_id} transition conflict from {expected}"
+                )
+        result = await self.get_handoff(handoff_id)
+        assert result is not None
+        return result
+
 
 class CaseKernel:
     def __init__(self, store: CoreStore):
@@ -341,9 +794,26 @@ class CaseKernel:
     async def authorize_action(self, command: ActionCommand, expected_version: int) -> ActionRecord:
         duplicate = await self.store.get_action_by_key(command.idempotency_key)
         if duplicate:
+            if duplicate.command != command:
+                raise ValueError(
+                    "Idempotency key is already bound to a different action command"
+                )
             return duplicate
-        if command.action == "issue_refund" and not command.consent_evidence_ref:
-            raise ValueError("Refund action requires explicit consent evidence")
+        specification = ACTION_SPECIFICATIONS.get(command.action)
+        if specification is None:
+            raise ValueError(f"Unknown consequential action: {command.action}")
+        missing = specification.required_parameters - command.parameters.keys()
+        if missing:
+            raise ValueError(f"Missing required action parameters: {', '.join(sorted(missing))}")
+        if specification.requires_consent and not command.consent_evidence_ref:
+            raise ValueError(f"Action {command.action} requires explicit consent evidence")
+        if specification.requires_approval and not command.approval_evidence_ref:
+            raise ValueError(f"Action {command.action} requires approval evidence")
+        unverified = specification.authoritative_parameters - command.parameter_fact_refs.keys()
+        if unverified:
+            raise ValueError(
+                "Authoritative parameters lack fact references: " + ", ".join(sorted(unverified))
+            )
         for parameter, fact_name in command.parameter_fact_refs.items():
             fact = await self.store.get_fact(command.case_id, fact_name)
             if fact is None:
@@ -361,12 +831,34 @@ class CaseKernel:
         return await self.store.insert_action(record, expected_version)
 
     async def mark_dispatched(self, action_id: str) -> ActionRecord:
-        return await self.store.update_action(action_id, ActionStatus.DISPATCHED, None)
+        action, _claimed = await self.store.claim_action(action_id)
+        return action
 
     async def record_outcome(self, action_id: str, status: ActionStatus, outcome: dict | None) -> ActionRecord:
         if status not in {ActionStatus.SUCCEEDED, ActionStatus.FAILED, ActionStatus.UNKNOWN, ActionStatus.RECONCILED}:
             raise ValueError("Invalid terminal/reconciliation status")
-        return await self.store.update_action(action_id, status, outcome)
+        current = await self.store.get_action(action_id)
+        if current is None:
+            raise KeyError(action_id)
+        allowed = {
+            ActionStatus.DISPATCHED: {
+                ActionStatus.SUCCEEDED,
+                ActionStatus.FAILED,
+                ActionStatus.UNKNOWN,
+            },
+            ActionStatus.UNKNOWN: {
+                ActionStatus.UNKNOWN,
+                ActionStatus.FAILED,
+                ActionStatus.RECONCILED,
+            },
+        }
+        if status not in allowed.get(current.status, set()):
+            raise ValueError(
+                f"Invalid action transition: {current.status.value} -> {status.value}"
+            )
+        return await self.store.transition_action(
+            action_id, current.status, status, outcome
+        )
 
 
 StoreFactory = Callable[[str], CoreStore]

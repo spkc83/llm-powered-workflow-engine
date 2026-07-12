@@ -30,7 +30,8 @@ COPY --from=deps /usr/local/bin /usr/local/bin
 # Copy application code
 COPY . .
 
-# Create data directory for SQLite (dev only; production uses PostgreSQL)
+# Create data directory for built-in SQLite stores. Production may mount a
+# conforming external store adapter and still keeps ADK sessions separate.
 RUN mkdir -p /app/data && chown -R appuser:appuser /app
 
 # Switch to non-root user
