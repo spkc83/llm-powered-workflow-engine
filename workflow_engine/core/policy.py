@@ -74,6 +74,8 @@ class PolicySigner:
             }
         ):
             return False
+        if package.signing_key_id is None:
+            return False
         verification_key = self.verification_keys.get(package.signing_key_id)
         if verification_key is None:
             return False
