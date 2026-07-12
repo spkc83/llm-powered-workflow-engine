@@ -1,6 +1,6 @@
 # LLM-Powered Workflow Engine
 
-A deterministic, omnichannel workflow engine with bounded [Google ADK](https://adk.dev/) 2.1 interaction capabilities. Models propose intent, facts, and wording; typed policy, durable cases, and an independent action gateway control business actions. Designed for customer service, fraud operations, and claims workflows at financial institutions.
+A deterministic, omnichannel workflow engine with bounded [Google ADK](https://adk.dev/) 2.4 interaction capabilities. Models propose intent, facts, and wording; typed policy, durable cases, and an independent action gateway control business actions. Designed for customer service, fraud operations, and claims workflows at financial institutions.
 
 Agents follow YAML-defined step-by-step procedures while maintaining natural conversational interaction, with runtime enforcement via a stateful procedure executor.
 
@@ -474,25 +474,13 @@ Workflow progress is tracked via session state keys:
 
 ## API Reference
 
-The API is versioned at `/api/v1`. Legacy routes at `/api/` are maintained for backward compatibility.
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/chat` | Send a message, get agent response (guardrail-filtered) |
-| `WS` | `/api/v1/ws/chat` | WebSocket for streaming responses (guardrail-filtered) |
-| `POST` | `/api/v1/ivr/turns` | Normalize and deduplicate a final IVR/ASR turn |
-| `POST` | `/api/v1/core/refunds` | Execute an authorized idempotent refund command |
-| `GET` | `/api/v1/customers?limit=&offset=` | List customers (paginated) |
-| `GET` | `/api/v1/sessions?user_id=...` | List sessions for a user |
-| `GET` | `/api/v1/procedures` | List all loaded procedures |
-| `GET` | `/api/v1/procedures/active` | List active procedure executors with progress |
-| `GET` | `/api/v1/session/{id}/state?user_id=...` | Get workflow state |
-| `GET` | `/api/v1/session/{id}/procedure` | Get procedure execution progress and step history |
-| `GET` | `/api/v1/tables/{name}?limit=&offset=` | Browse database table contents (paginated) |
-| `GET` | `/api/v1/metrics` | Operational metrics for monitoring dashboards |
-| `GET` | `/health` | Health check with version and status |
-
-See [docs/api.md](docs/api.md) for request/response schemas and examples.
+The versioned API is rooted at `/api/v1`. The canonical chat/IVR turn endpoint,
+typed action gateway, provider adapter contracts, handoff APIs, policy APIs, and
+operations endpoints are documented in [docs/api.md](docs/api.md). FastAPI
+publishes the live OpenAPI schema at `/openapi.json`, Swagger UI at `/docs`, and
+ReDoc at `/redoc`. WebSocket frame schemas are published by
+`GET /api/v1/integrations/contracts` because WebSocket frames are not represented
+in OpenAPI.
 
 ## Extending the Engine
 
