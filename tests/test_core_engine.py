@@ -164,6 +164,9 @@ async def test_chat_and_ivr_share_dedupe_and_truthful_handoff(tmp_path):
     store = SQLiteCoreStore(tmp_path / "conversation.db")
     await store.initialize()
     runtime = ConversationRuntime(store)
+    await CaseKernel(store).create_case(
+        "CASE-1", "CUST-456", "cs_complaint", "1.0.0"
+    )
     chat = MessageEnvelope(
         message_id="provider-1",
         conversation_id="CONV-1",

@@ -1,56 +1,75 @@
 # Operations Runbook
 
-## Startup
+## Startup gate
 
-1. Load secrets and environment configuration.
-2. Initialize/migrate the domain/core database.
-3. Initialize the separate ADK 2.x session database.
-4. Validate tool classification and active policy signatures.
-5. Start the API and verify `/health` reports version `2.0.0`.
-
-SQLite is the development/default store. Production database adapters must preserve
-transactions, optimistic compare-and-swap, and unique constraints.
+1. Load environment and secret-manager values.
+2. Initialize/migrate domain/core and policy stores.
+3. Initialize the separate ADK 2.4 session store.
+4. Verify active policy signatures and distinct author/approver identities.
+5. Verify upstream mode: sandbox only in development, disabled until real adapters
+   pass conformance.
+6. Verify NAM profile and enforcement setting.
+7. Start the API; `/health` must report version `3.0.0`, adapter mode, and profile.
+8. Verify `/api/v1/operations/audit-integrity`.
 
 ## Required production configuration
 
-- `ENVIRONMENT=production`
-- `AUTH_ENABLED=true`
-- strong JWT secret or external issuer integration
-- production domain/core database URL
-- separate ADK session database URL
-- policy signing key from a secret manager
-- distinct `POLICY_AUTHOR` and `POLICY_APPROVER` identities
-- explicit CORS origins and rate limits
-- chat/IVR provider credentials in provider-specific adapters
+- `ENVIRONMENT=production`, `AUTH_ENABLED=true`;
+- production JWT/issuer configuration and explicit CORS/rate limits;
+- domain/core and policy repository adapters with conformance evidence;
+- separate ADK session database;
+- secret-managed `POLICY_SIGNING_KEY` and versioned key ID;
+- different policy author/approver identities;
+- approved jurisdiction fixture with enforcement enabled;
+- real provider adapters and callback authentication;
+- provider credentials outside prompts, ADK state, and logs.
 
-## Action reconciliation
+Production rejects sandbox mode. With adapters disabled, upstream endpoints return
+`503` and consequential effects fail closed.
 
-Monitor `action_attempts` for `unknown`. A reconciler queries the connector by
-stable business key and records `reconciled`, `failed`, or a renewed `unknown`.
-Never dispatch again to discover the result. Alert when an unknown result exceeds
-the procedure-owned deadline.
+## Workers and reconciliation
 
-## Handoff operations
+Authorization atomically creates an outbox entry. Run the action worker continuously
+or invoke `/api/v1/operations/workers/actions:run` for controlled development. It
+leases due records, dispatches once, applies exponential retry only to local worker
+failures, and quarantines repeated processing errors.
 
-Monitor requested, accepted, timed-out, and failed transfers. Customer-visible
-connected status requires durable acceptance with an agent ID. Queue adapters must
-preserve the core lifecycle.
+Monitor `unknown` actions and run the reconciliation worker. It queries provider
+state; stale `dispatched` records become ambiguous after the configured delay.
+Repeated `unknown` queries also wait for that delay to avoid hammering a provider.
+Never redispatch to discover success. Alert when unknown age exceeds the
+procedure-owned deadline.
 
-## Rollout and rollback
+## Operational endpoints
 
-Canary by procedure, channel, and risk tier. Advancement requires zero unauthorized
-actions and complete mandatory evidence. Roll back conversational models/prompts
-independently; never roll an active case to another policy version silently.
+- `/operations/actions` — status and outcomes;
+- `/operations/outbox` — pending/leased/failed/quarantined/delivered work;
+- `/operations/conversation-quarantine` — provider ordering gaps;
+- `/operations/delivery-receipts` — channel delivery callbacks;
+- `/operations/audit-integrity` — local hash-chain check;
+- `/metrics` — action/outbox counts, policies, adapter/profile state.
 
-## Backup and recovery
+Restrict these routes with administrative RBAC and network policy.
 
-Back up domain/core and ADK databases independently. Domain/core data is the
-authority. Recovery testing must prove inbox dedupe, action idempotency, unknown
-outcome reconciliation, procedure version locks, and handoff state reconstruction.
+## Handoff
 
-## Observability
+Monitor requested, queued, accepted, connected, timeout, reassignment, failure,
+resolution, and bot re-entry independently. Queue acknowledgment is not connection.
+Callbacks must be authenticated, replay-protected, and transition-valid.
 
-Trace provider message → conversation → ADK invocation → case/facts → policy →
-action → connector → delivery/handoff. Track latency percentiles, duplicate
-suppression, blocked actions, unknown outcomes, reconciliation age, clarification,
-transfer, abandonment, and recontact.
+## Backup, recovery, and rollback
+
+Back up core/policy, business, ADK, and provider records according to their distinct
+retention. Recovery tests prove action idempotency, outbox lease recovery, unknown
+reconciliation, provider-scoped inbox dedupe, sequence quarantine, policy version
+lock, handoff reconstruction, and audit verification.
+
+During rollback, stop all v3 dispatch workers before starting another version. Never
+run two versions that disagree on command schema or idempotency concurrently.
+
+## Canary
+
+Canary by procedure, channel, provider, and risk. Advancement requires zero
+unauthorized effects, complete required evidence, no overdue unknown outcomes,
+provider conformance, acceptable latency/error budget, and truthful handoff/delivery
+status. Models/prompts can roll back independently from case/policy state.

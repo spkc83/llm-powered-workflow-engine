@@ -92,5 +92,5 @@ class CoreEngine:
             },
             consent_evidence_ref=consent_evidence_ref,
         )
-        authorized = await self.kernel.authorize_action(command, case.version)
+        authorized = await self.gateway.authorize(command, case.version)
         return await self.gateway.dispatch(authorized)

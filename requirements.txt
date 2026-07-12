@@ -1,4 +1,4 @@
-# Install with the direct-version constraints captured from the Phase 0 baseline.
+# Install with the audited v3 dependency constraints.
 -c constraints.txt
 
 # Core framework

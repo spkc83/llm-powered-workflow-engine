@@ -13,16 +13,16 @@ import uuid
 import hashlib
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 from dotenv import load_dotenv
 
 # Load environment variables before any other imports
 load_dotenv()
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 
 from google.adk.runners import Runner
 from google.adk.sessions import DatabaseSessionService
@@ -34,14 +34,20 @@ from workflow_engine.auth.context import resolve_customer_context, session_owner
 from workflow_engine.auth.jwt_handler import decode_access_token
 from workflow_engine.auth.models import Role, UserContext
 from workflow_engine.auth.rbac import build_user_context
-from workflow_engine.agents.guardrails import filter_response, steer_response
+from workflow_engine.agents.guardrails import steer_response
 from workflow_engine.audit.logger import init_audit_logger
-from workflow_engine.channels.base import ChannelType, OutboundMessage
 from workflow_engine.channels.http import HttpChannel, WebSocketChannel
-from workflow_engine.database import close_connection, init_db, query_all, seed_all
+from workflow_engine.database import (
+    close_connection,
+    configure_db_path,
+    init_db,
+    query_all,
+    seed_all,
+)
 from workflow_engine.database.repository import AuditRepository
 from workflow_engine.database.repository import OrderRepository
 from workflow_engine.errors import NotFoundError, ValidationError, WorkflowEngineError
+from workflow_engine.errors import AuthorizationError
 from workflow_engine.logging_config import LogContext, get_logger, setup_logging
 from workflow_engine.middleware.auth import AuthMiddleware, get_current_user
 from workflow_engine.middleware.correlation import CorrelationMiddleware
@@ -50,14 +56,58 @@ from workflow_engine.middleware.rate_limiter import RateLimiterMiddleware
 from workflow_engine.procedures.executor import ProcedureExecutorRegistry
 from workflow_engine.settings import get_settings
 from workflow_engine.core import CaseKernel, create_core_store
+from workflow_engine.core.adapter_loading import load_factory
 from workflow_engine.core.connectors import DatabaseRefundConnector
 from workflow_engine.core.domains import OrderSnapshot, RefundDecisionService
 from workflow_engine.core.gateway import ActionGateway
 from workflow_engine.core.service import CoreEngine
-from workflow_engine.core.policy import PolicyPackage, PolicyRegistry, PolicySigner
+from workflow_engine.core.policy import (
+    PolicyLifecycle,
+    PolicyPackage,
+    PolicyRegistry,
+    PolicySigner,
+)
+from workflow_engine.core.policy_store import PolicyService, create_policy_repository
+from workflow_engine.core.action_service import (
+    ACTION_PERMISSIONS,
+    ConsequentialActionRequest,
+    ConsequentialActionService,
+)
+from workflow_engine.core.workers import ActionDeliveryWorker, ReconciliationWorker
+from workflow_engine.core.kernel import ActionStatus, OutboxStatus
+from workflow_engine.core.jurisdiction import JurisdictionGuard, load_jurisdiction_profile
 from workflow_engine.auth.models import Permission
 from workflow_engine.conversation.runtime import ChannelKind, ConversationRuntime, MessageEnvelope
+from workflow_engine.conversation.contracts import RiskLevel
+from workflow_engine.conversation.service import (
+    ConversationService,
+    GeneratedTurn,
+    TurnContext,
+    TurnResult,
+)
+from workflow_engine.conversation.runtime import HandoffStatus
 from workflow_engine.channels.ivr import IvrAdapter
+from workflow_engine.integrations.contracts import (
+    HandoffRequest,
+    ProviderReceipt,
+    SttRequest,
+    SttResult,
+    TelephonyEvent,
+    TtsRequest,
+    TtsResult,
+)
+from workflow_engine.integrations.sandbox import (
+    DisabledActionConnector,
+    LocalChatAdapter,
+    LocalTelephonyAdapter,
+    SandboxScenario,
+    SQLiteDeliveryReceiptStore,
+    SQLiteHandoffQueueAdapter,
+    SQLiteSandboxActionConnector,
+    StubSpeechToTextAdapter,
+    StubTextToSpeechAdapter,
+)
+from workflow_engine.settings import UpstreamMode
 
 # --- Initialize logging ---
 settings = get_settings()
@@ -102,9 +152,20 @@ async def lifespan(app: FastAPI):
     logger.info("Starting workflow engine (env=%s)", settings.environment.value)
 
     # Initialize database
+    configure_db_path(settings.reference_data_sqlite_path)
     await init_db()
-    await seed_all()
+    if settings.effective_seed_reference_data:
+        await seed_all()
     await core_store.initialize()
+    await policy_repository.initialize()
+    await sandbox_action_connector.initialize()
+    await handoff_provider.initialize()
+    await delivery_receipts.initialize()
+    for package in bootstrap_policies:
+        if await policy_repository.get(package.package_id) is None:
+            await policy_repository.save(package)
+    policy_registry.clear()
+    await policy_service.hydrate()
 
     # Initialize audit logger with DB persistence
     init_audit_logger(db_write_func=AuditRepository.write)
@@ -174,9 +235,20 @@ runner = Runner(
 executor_registry = ProcedureExecutorRegistry()
 
 # Authoritative core action path. ADK/model code cannot write action records.
-core_store = create_core_store(settings.database_url)
+_core_scheme = settings.database_url.split(":", 1)[0].split("+", 1)[0]
+_core_adapters = {}
+if settings.core_store_adapter_factory:
+    _core_adapters[_core_scheme] = load_factory(settings.core_store_adapter_factory)
+core_store = create_core_store(settings.database_url, adapters=_core_adapters)
 core_kernel = CaseKernel(core_store)
-policy_signer = PolicySigner(settings.policy_signing_key.encode())
+policy_signer = PolicySigner(
+    settings.policy_signing_key.encode(),
+    key_id=settings.policy_signing_key_id,
+    verification_keys={
+        key_id: value.encode()
+        for key_id, value in settings.policy_verification_keys.items()
+    },
+)
 active_refund_policy = policy_signer.activate(
     policy_signer.approve(
         PolicyPackage(
@@ -185,19 +257,124 @@ active_refund_policy = policy_signer.activate(
             version="1.0.0",
             jurisdiction=settings.jurisdiction_profile,
             author=settings.policy_author,
-            rules={"refund_window_days": 30, "requires_explicit_consent": True},
+            rules={
+                "refund_window_days": 30,
+                "requires_explicit_consent": True,
+                "allowed_actions": [
+                    "issue_refund",
+                    "issue_store_credit",
+                    "update_case_status",
+                    "escalate_to_supervisor",
+                    "add_case_note",
+                ],
+            },
+        ),
+        approver=settings.policy_approver,
+    )
+)
+active_reg_e_policy = policy_signer.activate(
+    policy_signer.approve(
+        PolicyPackage(
+            package_id=f"reg-e@1.0.0:{settings.jurisdiction_profile}",
+            procedure_id="cs_eft_dispute",
+            version="1.0.0",
+            jurisdiction=settings.jurisdiction_profile,
+            author=settings.policy_author,
+            rules={
+                "allowed_actions": [
+                    "file_eft_dispute",
+                    "issue_provisional_credit",
+                    "escalate_to_supervisor",
+                    "add_case_note",
+                ]
+            },
+        ),
+        approver=settings.policy_approver,
+    )
+)
+active_fraud_policy = policy_signer.activate(
+    policy_signer.approve(
+        PolicyPackage(
+            package_id=f"fraud@1.0.0:{settings.jurisdiction_profile}",
+            procedure_id="fraud_alert_triage",
+            version="1.0.0",
+            jurisdiction=settings.jurisdiction_profile,
+            author=settings.policy_author,
+            rules={
+                "allowed_actions": [
+                    "flag_account",
+                    "submit_sar",
+                    "close_alert",
+                    "escalate_to_supervisor",
+                    "add_case_note",
+                ]
+            },
         ),
         approver=settings.policy_approver,
     )
 )
 policy_registry = PolicyRegistry(policy_signer)
-policy_registry.load(active_refund_policy)
+for _package in (active_refund_policy, active_reg_e_policy, active_fraud_policy):
+    policy_registry.load(_package)
+bootstrap_policies = (active_refund_policy, active_reg_e_policy, active_fraud_policy)
+_policy_url = settings.effective_policy_database_url
+_policy_scheme = _policy_url.split(":", 1)[0].split("+", 1)[0]
+_policy_adapters = {}
+if settings.policy_repository_adapter_factory:
+    _policy_adapters[_policy_scheme] = load_factory(
+        settings.policy_repository_adapter_factory
+    )
+policy_repository = create_policy_repository(_policy_url, adapters=_policy_adapters)
+policy_service = PolicyService(policy_repository, policy_signer, policy_registry)
+
+sandbox_action_connector = SQLiteSandboxActionConnector(settings.sandbox_sqlite_path)
+if settings.effective_upstream_mode is UpstreamMode.SANDBOX:
+    default_action_connector = sandbox_action_connector
+else:
+    default_action_connector = DisabledActionConnector()
+handoff_provider = SQLiteHandoffQueueAdapter(settings.sandbox_sqlite_path)
+delivery_receipts = SQLiteDeliveryReceiptStore(settings.sandbox_sqlite_path)
+chat_provider = LocalChatAdapter(delivery_receipts)
+stt_provider = StubSpeechToTextAdapter()
+tts_provider = StubTextToSpeechAdapter()
+telephony_provider = LocalTelephonyAdapter()
+jurisdiction_profile = load_jurisdiction_profile(
+    settings.jurisdiction_profile, settings.jurisdiction_config_path
+)
+jurisdiction_guard = JurisdictionGuard(
+    jurisdiction_profile, enforce=settings.effective_jurisdiction_enforcement
+)
+consequential_connectors = {
+    name: default_action_connector
+    for name in ACTION_PERMISSIONS
+}
 core_gateway = ActionGateway(
     core_kernel,
-    {"issue_refund": DatabaseRefundConnector()},
+    {
+        "issue_refund": (
+            DatabaseRefundConnector()
+            if settings.effective_upstream_mode is UpstreamMode.SANDBOX
+            else DisabledActionConnector()
+        ),
+        **consequential_connectors,
+    },
     policy_registry=policy_registry,
+    policy_resolver=policy_service,
 )
 core_engine = CoreEngine(core_kernel, core_gateway, RefundDecisionService())
+consequential_action_service = ConsequentialActionService(
+    core_kernel, core_gateway, sandbox_action_connector
+)
+action_worker = ActionDeliveryWorker(
+    core_store,
+    core_gateway,
+    lease_seconds=settings.action_worker_lease_seconds,
+)
+reconciliation_worker = ReconciliationWorker(
+    core_store,
+    core_gateway,
+    dispatch_stale_seconds=settings.action_reconciliation_delay_seconds,
+)
 conversation_runtime = ConversationRuntime(core_store)
 ivr_adapter = IvrAdapter()
 
@@ -209,6 +386,12 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=10000, description="User message text")
     session_id: Optional[str] = Field(default=None, description="Existing session ID to continue")
     message_id: Optional[str] = Field(default=None, description="Stable provider message ID for dedupe")
+    provider_id: str = Field(
+        default="local-chat",
+        min_length=1,
+        max_length=100,
+        description="Namespace assigned to the chat provider; dedupe is scoped to this value",
+    )
     user_id: str = Field(
         min_length=1,
         max_length=100,
@@ -235,6 +418,7 @@ class RefundCommandResponse(BaseModel):
 
 
 class IvrTurnRequest(BaseModel):
+    provider_id: str = "local-ivr"
     message_id: str
     conversation_id: str
     customer_id: str
@@ -247,6 +431,103 @@ class IvrTurnResponse(BaseModel):
     accepted: bool
     requires_readback: bool
     proposed_authority: str
+
+
+class ConversationTurnRequest(BaseModel):
+    provider_id: str = Field(default="local", min_length=1, max_length=100)
+    message_id: str = Field(min_length=1, max_length=300)
+    conversation_id: str = Field(min_length=1, max_length=300)
+    customer_id: str = Field(min_length=1, max_length=100)
+    channel: ChannelKind
+    text: str = Field(min_length=1, max_length=10000)
+    locale: str = "en-US"
+    timezone: str = "America/Chicago"
+    sequence: int | None = Field(default=None, ge=0)
+    asr_confidence: float | None = Field(default=None, ge=0, le=1)
+    interrupted: bool = False
+    consent_snapshot: dict = Field(default_factory=dict)
+    contains_dtmf_secret: bool = False
+    secure_dtmf_capture: bool = False
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "provider_id": "sandbox-telephony",
+                    "message_id": "CALL-1001:TURN-3",
+                    "conversation_id": "CALL-1001",
+                    "customer_id": "CUST-456",
+                    "channel": "ivr",
+                    "text": "The amount was seventy nine dollars and ninety nine cents",
+                    "asr_confidence": 0.86,
+                    "interrupted": False,
+                    "consent_snapshot": {"recording": True, "transcription": True},
+                }
+            ]
+        }
+    }
+
+
+class WebSocketTurnFrame(BaseModel):
+    type: Literal["user_turn"] = "user_turn"
+    provider_id: str = Field(default="local-websocket", min_length=1, max_length=100)
+    message_id: str = Field(min_length=1, max_length=300)
+    session_id: str | None = Field(default=None, max_length=300)
+    user_id: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=10000)
+    sequence: int | None = Field(default=None, ge=0)
+    locale: str = "en-US"
+    timezone: str = "America/Chicago"
+    consent_snapshot: dict = Field(default_factory=dict)
+
+
+class WebSocketResponseFrame(BaseModel):
+    type: Literal["agent_response"] = "agent_response"
+    session_id: str
+    text: str
+    risk: RiskLevel
+    may_stream: bool
+
+
+class CreateHandoffRequest(BaseModel):
+    conversation_id: str
+    case_id: str
+    customer_id: str
+    queue: str = "customer-service"
+    priority: str = "normal"
+    context: dict
+
+
+class HandoffCallbackRequest(BaseModel):
+    status: HandoffStatus
+    assigned_agent_id: str | None = None
+
+
+class PolicyDraftRequest(BaseModel):
+    package_id: str
+    procedure_id: str
+    version: str
+    jurisdiction: str = "NAM"
+    rules: dict
+
+
+class SandboxResourceRequest(BaseModel):
+    resource_type: str
+    resource_id: str
+    payload: dict
+
+
+class SandboxScenarioRequest(BaseModel):
+    idempotency_key: str
+    scenario: SandboxScenario
+
+
+class ChatDeliveryRequest(BaseModel):
+    message_id: str | None = None
+    conversation_id: str
+    customer_id: str
+    text: str = Field(min_length=1, max_length=10000)
+    metadata: dict = Field(default_factory=dict)
 
 
 class ProcedureInfo(BaseModel):
@@ -273,6 +554,8 @@ class HealthResponse(BaseModel):
     environment: str
     procedures_loaded: int
     auth_enabled: bool
+    upstream_mode: str
+    jurisdiction_profile: str
 
 
 # --- Workflow state keys to expose ---
@@ -289,6 +572,102 @@ _WORKFLOW_STATE_KEYS = {
     "escalation_reason",
     "escalated_at",
 }
+
+
+async def _generate_safe_turn(context: TurnContext, text: str) -> GeneratedTurn:
+    """Run ADK proposal/response generation and the complete safety pipeline once."""
+    with LogContext(session_id=context.conversation_id, user_id=context.actor_id):
+        logger.info(
+            "Conversation turn actor=%s customer=%s session=%s channel=%s",
+            context.actor_id,
+            context.customer_id,
+            context.conversation_id,
+            context.channel.value,
+        )
+        session = await session_service.get_session(
+            app_name=settings.app_name,
+            user_id=context.owner_id,
+            session_id=context.conversation_id,
+        )
+        if session is None:
+            session = await session_service.create_session(
+                app_name=settings.app_name,
+                user_id=context.owner_id,
+                session_id=context.conversation_id,
+                state={
+                    "customer_id": context.customer_id,
+                    "actor_id": context.actor_id,
+                    "actor_role": context.actor_role,
+                    "actor_permissions": context.actor_permissions,
+                    "current_date": date.today().isoformat(),
+                    "channel": context.channel.value,
+                    "locale": context.locale,
+                    "timezone": context.timezone,
+                },
+            )
+        session.state["customer_id"] = context.customer_id
+        session.state["current_date"] = date.today().isoformat()
+        session.state["channel"] = context.channel.value
+
+        response_parts: list[str] = []
+        async for event in runner.run_async(
+            user_id=context.owner_id,
+            session_id=context.conversation_id,
+            new_message=genai_types.Content(
+                role="user", parts=[genai_types.Part(text=text)]
+            ),
+        ):
+            if event.author == "router_agent" or not event.content or not event.content.parts:
+                continue
+            for part in event.content.parts:
+                if part.text:
+                    candidate = part.text.strip()
+                    if candidate and (
+                        not response_parts or candidate != response_parts[-1].strip()
+                    ):
+                        response_parts.append(part.text)
+
+        response_text = "\n\n".join(response_parts) if response_parts else ""
+        if not response_text.strip():
+            response_text = (
+                "I'm sorry, I wasn't able to process your request. "
+                "Could you please rephrase or provide more details?"
+            )
+
+        active_procedure_id = session.state.get("current_procedure")
+        active_step = session.state.get("current_step")
+        procedure_def = registry.procedures.get(active_procedure_id)
+        response_text, violations, verification = await steer_response(
+            text=response_text,
+            session_state=dict(session.state),
+            procedure_id=active_procedure_id,
+            current_step=active_step,
+            procedure_def=procedure_def,
+            generate_fn=None,
+            max_iterations=2,
+        )
+        if violations:
+            logger.warning(
+                "Guardrail violations filtered from response (session=%s): %s",
+                context.conversation_id,
+                [violation.rule for violation in violations],
+            )
+        if verification and not verification.is_valid and verification.verdict != "NOT_APPLICABLE":
+            logger.warning(
+                "Reasoning verification result (session=%s): verdict=%s, findings=%d",
+                context.conversation_id,
+                verification.verdict,
+                len(verification.findings),
+            )
+        risk = RiskLevel.INFORMATIONAL
+        if active_procedure_id == "cs_eft_dispute":
+            risk = RiskLevel.REGULATED
+        elif active_procedure_id in {"cs_refund", "fraud_alert_triage"}:
+            risk = RiskLevel.CONSEQUENTIAL
+        return GeneratedTurn(text=response_text, risk=risk)
+
+
+conversation_service = ConversationService(conversation_runtime, _generate_safe_turn)
 
 
 # ===========================================================================
@@ -318,123 +697,27 @@ async def chat_v1(
 
     session_id = inbound.session_id or str(uuid.uuid4())
     await core_store.initialize()
-    accepted = await conversation_runtime.accept(
+    result = await conversation_service.process_turn(
         MessageEnvelope(
+            provider_id=(
+                request.provider_id
+                if actor.role in {Role.ADMIN, Role.INTEGRATION}
+                else "direct-api"
+            ),
             message_id=inbound.channel_message_id or f"local:{uuid.uuid4().hex}",
             conversation_id=session_id,
             customer_id=customer.customer_id,
             channel=ChannelKind.CHAT,
             text=inbound.text,
-        )
+        ),
+        actor_id=actor.user_id,
+        actor_role=actor.role.value,
+        actor_permissions=sorted(actor.permissions),
+        owner_id=owner_id,
     )
-    if not accepted:
+    if result.duplicate:
         return ChatResponse(response="This message was already received.", session_id=session_id)
-
-    with LogContext(session_id=session_id, user_id=actor.user_id):
-        logger.info(
-            "Chat request actor=%s customer=%s session=%s",
-            actor.user_id,
-            customer.customer_id,
-            session_id,
-        )
-
-        # Get or create session
-        session = await session_service.get_session(
-            app_name=settings.app_name,
-            user_id=owner_id,
-            session_id=session_id,
-        )
-        if session is None:
-            session = await session_service.create_session(
-                app_name=settings.app_name,
-                user_id=owner_id,
-                session_id=session_id,
-                state={
-                    "customer_id": inbound.user_id,
-                    "actor_id": actor.user_id,
-                    "actor_role": actor.role.value,
-                    "actor_permissions": sorted(actor.permissions),
-                    "current_date": date.today().isoformat(),
-                },
-            )
-
-        # Ensure customer_id and current_date are always available in session state
-        if not session.state.get("customer_id"):
-            session.state["customer_id"] = inbound.user_id
-        session.state["current_date"] = date.today().isoformat()
-
-        # Build user message
-        user_message = genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=inbound.text)],
-        )
-
-        # Run agent and collect response text from sub-agents
-        response_parts: list[str] = []
-        async for event in runner.run_async(
-            user_id=owner_id,
-            session_id=session_id,
-            new_message=user_message,
-        ):
-            if (
-                event.author != "router_agent"
-                and event.content
-                and event.content.parts
-            ):
-                for part in event.content.parts:
-                    if part.text:
-                        # Skip duplicate text from multi-turn tool call loops
-                        text = part.text.strip()
-                        if text and (not response_parts or text != response_parts[-1].strip()):
-                            response_parts.append(part.text)
-
-        response_text = "\n\n".join(response_parts) if response_parts else ""
-
-        # Fallback when the model produces no output (e.g., STOP with no content)
-        if not response_text.strip():
-            logger.warning("Empty response from agent for session=%s", session_id)
-            response_text = (
-                "I'm sorry, I wasn't able to process your request. "
-                "Could you please rephrase or provide more details?"
-            )
-
-        # Apply guardrails — layered pipeline: pattern rails → reasoning → compliance → steering
-        # Extract procedure context from session state for reasoning verification
-        active_procedure_id = session.state.get("current_procedure") if session.state else None
-        active_step = session.state.get("current_step") if session.state else None
-        session_state_dict = dict(session.state) if session.state else {}
-
-        # Look up the procedure definition for rule extraction
-        procedure_def = None
-        if active_procedure_id and active_procedure_id in registry.procedures:
-            procedure_def = registry.procedures[active_procedure_id]
-
-        response_text, violations, verification = await steer_response(
-            text=response_text,
-            session_state=session_state_dict,
-            procedure_id=active_procedure_id,
-            current_step=active_step,
-            procedure_def=procedure_def,
-            generate_fn=None,  # No rewrite loop for now — requires LLM callback
-            max_iterations=2,
-        )
-        if violations:
-            logger.warning(
-                "Guardrail violations filtered from response (session=%s): %s",
-                session_id,
-                [v.rule for v in violations],
-            )
-        if verification and not verification.is_valid and verification.verdict != "NOT_APPLICABLE":
-            logger.warning(
-                "Reasoning verification result (session=%s): verdict=%s, findings=%d",
-                session_id,
-                verification.verdict,
-                len(verification.findings),
-            )
-
-        logger.info("Chat response generated (len=%d)", len(response_text))
-
-        return ChatResponse(response=response_text, session_id=session_id)
+    return ChatResponse(response=result.response or "", session_id=session_id)
 
 
 @app.post(
@@ -448,6 +731,7 @@ async def create_refund_command(
 ) -> RefundCommandResponse:
     """Execute a refund only through the deterministic action gateway."""
     customer = resolve_customer_context(actor, request.customer_id)
+    _require_upstream_available()
     if actor.role is not Role.CUSTOMER and not actor.has_permission(Permission.REFUND_WRITE):
         from workflow_engine.errors import AuthorizationError
 
@@ -509,6 +793,7 @@ async def accept_ivr_turn(
     await core_store.initialize()
     accepted = await conversation_runtime.accept(
         MessageEnvelope(
+            provider_id=request.provider_id,
             message_id=turn.provider_message_id,
             conversation_id=turn.conversation_id,
             customer_id=turn.customer_id,
@@ -525,6 +810,491 @@ async def accept_ivr_turn(
         requires_readback=turn.requires_readback,
         proposed_authority=turn.proposed_authority.value,
     )
+
+
+def _require_permission(actor: UserContext, permission: Permission) -> None:
+    if actor.role is not Role.ADMIN and not actor.has_permission(permission):
+        raise AuthorizationError(
+            f"Operation requires {permission.value}",
+            required_permission=permission.value,
+        )
+
+
+def _require_upstream_available() -> None:
+    if settings.effective_upstream_mode is not UpstreamMode.SANDBOX:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No upstream provider adapter is configured. The built-in sandbox "
+                "is available only in development."
+            ),
+        )
+
+
+@app.post(
+    f"{settings.api_prefix}/conversations/turns",
+    response_model=TurnResult,
+    tags=["conversations"],
+    summary="Process a chat or IVR turn through the shared safety pipeline",
+)
+async def process_conversation_turn(
+    request: ConversationTurnRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> TurnResult:
+    customer = resolve_customer_context(actor, request.customer_id)
+    if actor.role is Role.INTEGRATION:
+        _require_permission(actor, Permission.CHANNEL_INGEST)
+    owner_id = session_owner_id(actor.user_id, customer.customer_id)
+    capabilities = {}
+    jurisdiction_decision = jurisdiction_guard.evaluate_inbound(
+        channel=request.channel,
+        consent_snapshot=request.consent_snapshot,
+        contains_dtmf_secret=request.contains_dtmf_secret,
+        secure_dtmf_capture=request.secure_dtmf_capture,
+    )
+    if not jurisdiction_decision.allowed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "JURISDICTION_CONTROL_BLOCKED",
+                "blocks": jurisdiction_decision.blocks,
+                "profile_id": jurisdiction_decision.profile_id,
+            },
+        )
+    if request.channel is ChannelKind.IVR:
+        if request.asr_confidence is None:
+            raise ValidationError("IVR turns require asr_confidence")
+        normalized = ivr_adapter.normalize(
+            provider_message_id=request.message_id,
+            conversation_id=request.conversation_id,
+            customer_id=customer.customer_id,
+            transcript=request.text,
+            asr_confidence=request.asr_confidence,
+            interrupted=request.interrupted,
+        )
+        capabilities = {
+            "asr_confidence": normalized.asr_confidence,
+            "interrupted": normalized.interrupted,
+            "requires_readback": normalized.requires_readback,
+        }
+    await core_store.initialize()
+    return await conversation_service.process_turn(
+        MessageEnvelope(
+            provider_id=(
+                request.provider_id
+                if actor.role in {Role.ADMIN, Role.INTEGRATION}
+                else "direct-api"
+            ),
+            message_id=request.message_id,
+            conversation_id=request.conversation_id,
+            customer_id=customer.customer_id,
+            channel=request.channel,
+            text=request.text,
+            locale=request.locale,
+            timezone=request.timezone,
+            sequence=request.sequence,
+            capabilities=capabilities,
+            consent_snapshot=request.consent_snapshot,
+        ),
+        actor_id=actor.user_id,
+        actor_role=actor.role.value,
+        actor_permissions=sorted(actor.permissions),
+        owner_id=owner_id,
+    )
+
+
+@app.post(
+    f"{settings.api_prefix}/core/actions",
+    tags=["core-actions"],
+    summary="Submit a typed consequential action through the independent gateway",
+)
+async def submit_consequential_action(
+    request: ConsequentialActionRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    customer = resolve_customer_context(actor, request.customer_id)
+    permission = ACTION_PERMISSIONS[request.payload.action]
+    _require_permission(actor, permission)
+    _require_upstream_available()
+    if customer.customer_id != request.customer_id:
+        raise AuthorizationError("Action customer binding mismatch")
+    await core_store.initialize()
+    result = await consequential_action_service.submit(request, actor_id=actor.user_id)
+    return result.model_dump(mode="json")
+
+
+@app.post(
+    f"{settings.api_prefix}/integrations/ivr/stt:transcribe",
+    response_model=SttResult,
+    tags=["integration-development"],
+    summary="Invoke the configured speech-to-text adapter",
+)
+async def transcribe_ivr(
+    request: SttRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> SttResult:
+    _require_permission(actor, Permission.CHANNEL_INGEST)
+    _require_upstream_available()
+    return await stt_provider.transcribe(request)
+
+
+@app.post(
+    f"{settings.api_prefix}/integrations/ivr/tts:synthesize",
+    response_model=TtsResult,
+    tags=["integration-development"],
+    summary="Invoke the configured text-to-speech adapter",
+)
+async def synthesize_ivr(
+    request: TtsRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> TtsResult:
+    _require_permission(actor, Permission.CHANNEL_DELIVERY)
+    _require_upstream_available()
+    return await tts_provider.synthesize(request)
+
+
+@app.post(
+    f"{settings.api_prefix}/integrations/ivr/telephony/events",
+    tags=["integration-development"],
+    summary="Normalize a telephony-provider lifecycle event",
+)
+async def accept_telephony_event(
+    event: TelephonyEvent,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.CHANNEL_INGEST)
+    _require_upstream_available()
+    receipt = await telephony_provider.accept_event(event)
+    return receipt.model_dump(mode="json")
+
+
+@app.post(
+    f"{settings.api_prefix}/integrations/chat/deliveries",
+    response_model=ProviderReceipt,
+    tags=["integration-development"],
+    summary="Deliver a message through the configured chat-provider adapter",
+)
+async def deliver_chat_message(
+    request: ChatDeliveryRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> ProviderReceipt:
+    customer = resolve_customer_context(actor, request.customer_id)
+    _require_permission(actor, Permission.CHANNEL_DELIVERY)
+    _require_upstream_available()
+    return await chat_provider.send(
+        {**request.model_dump(mode="json"), "customer_id": customer.customer_id}
+    )
+
+
+@app.post(
+    f"{settings.api_prefix}/integrations/chat/receipts",
+    response_model=ProviderReceipt,
+    tags=["integration-development"],
+    summary="Record an authenticated delivery receipt from a chat provider",
+)
+async def record_chat_receipt(
+    receipt: ProviderReceipt,
+    actor: UserContext = Depends(get_current_user),
+) -> ProviderReceipt:
+    _require_permission(actor, Permission.PROVIDER_CALLBACK)
+    _require_upstream_available()
+    return await delivery_receipts.record(receipt)
+
+
+@app.get(
+    f"{settings.api_prefix}/integrations/contracts",
+    tags=["integration-development"],
+    summary="Return machine-readable REST and WebSocket integration contracts",
+)
+async def integration_contracts() -> dict:
+    return {
+        "version": __version__,
+        "upstream_mode": settings.effective_upstream_mode.value,
+        "websocket_url": f"{settings.api_prefix}/ws/chat",
+        "websocket_request_schema": WebSocketTurnFrame.model_json_schema(),
+        "websocket_response_schema": WebSocketResponseFrame.model_json_schema(),
+        "conversation_turn_schema": ConversationTurnRequest.model_json_schema(),
+        "action_schema": ConsequentialActionRequest.model_json_schema(),
+        "stt_schema": SttRequest.model_json_schema(),
+        "tts_schema": TtsRequest.model_json_schema(),
+        "telephony_event_schema": TelephonyEvent.model_json_schema(),
+        "chat_delivery_schema": ChatDeliveryRequest.model_json_schema(),
+        "delivery_receipt_schema": ProviderReceipt.model_json_schema(),
+        "jurisdiction_profile": jurisdiction_profile.model_dump(mode="json"),
+    }
+
+
+@app.get(
+    f"{settings.api_prefix}/jurisdictions/current",
+    tags=["governance"],
+    summary="Return the active operational jurisdiction controls",
+)
+async def current_jurisdiction_profile() -> dict:
+    return {
+        **jurisdiction_profile.model_dump(mode="json"),
+        "enforced": settings.effective_jurisdiction_enforcement,
+    }
+
+
+@app.post(
+    f"{settings.api_prefix}/handoffs",
+    tags=["human-handoff"],
+    summary="Create and enqueue a human-agent handoff",
+)
+async def create_handoff(
+    request: CreateHandoffRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    customer = resolve_customer_context(actor, request.customer_id)
+    _require_permission(actor, Permission.ESCALATION_CREATE)
+    _require_upstream_available()
+    case = await core_store.get_case(request.case_id)
+    if case is None:
+        raise NotFoundError("Core case", request.case_id)
+    if case.customer_id != customer.customer_id:
+        raise AuthorizationError("Handoff case does not belong to the serviced customer")
+    record = await conversation_runtime.request_handoff(
+        request.conversation_id,
+        request.case_id,
+        {**request.context, "customer_id": customer.customer_id},
+    )
+    receipt = await handoff_provider.enqueue(
+        HandoffRequest(
+            handoff_id=record.handoff_id,
+            conversation_id=record.conversation_id,
+            case_id=record.case_id,
+            queue=request.queue,
+            priority=request.priority,
+            context=record.context,
+        )
+    )
+    queued = await conversation_runtime.transition_handoff(
+        record.handoff_id, HandoffStatus.QUEUED
+    )
+    return {
+        "handoff": queued.model_dump(mode="json"),
+        "provider_receipt": receipt.model_dump(mode="json"),
+    }
+
+
+@app.get(
+    f"{settings.api_prefix}/handoffs/{{handoff_id}}",
+    tags=["human-handoff"],
+)
+async def get_handoff(
+    handoff_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.CASE_READ)
+    record = await core_store.get_handoff(handoff_id)
+    if record is None:
+        raise NotFoundError("Handoff", handoff_id)
+    return record
+
+
+@app.post(
+    f"{settings.api_prefix}/handoffs/{{handoff_id}}/callbacks",
+    tags=["human-handoff"],
+    summary="Apply an authenticated human-agent platform status callback",
+)
+async def update_handoff_from_provider(
+    handoff_id: str,
+    request: HandoffCallbackRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.PROVIDER_CALLBACK)
+    record = await conversation_runtime.transition_handoff(
+        handoff_id, request.status, request.assigned_agent_id
+    )
+    return record.model_dump(mode="json")
+
+
+@app.get(f"{settings.api_prefix}/policies", tags=["policy-governance"])
+async def list_policies(
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return [package.model_dump(mode="json") for package in await policy_repository.list()]
+
+
+@app.post(f"{settings.api_prefix}/policies", tags=["policy-governance"])
+async def create_policy_draft(
+    request: PolicyDraftRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    package = await policy_service.create_draft(
+        PolicyPackage(
+            package_id=request.package_id,
+            procedure_id=request.procedure_id,
+            version=request.version,
+            jurisdiction=request.jurisdiction,
+            author=actor.user_id,
+            rules=request.rules,
+        )
+    )
+    return package.model_dump(mode="json")
+
+
+@app.post(
+    f"{settings.api_prefix}/policies/{{package_id}}/approve",
+    tags=["policy-governance"],
+)
+async def approve_policy(
+    package_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    return (await policy_service.approve(package_id, actor.user_id)).model_dump(mode="json")
+
+
+@app.post(
+    f"{settings.api_prefix}/policies/{{package_id}}/activate",
+    tags=["policy-governance"],
+)
+async def activate_policy(
+    package_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    return (await policy_service.activate(package_id)).model_dump(mode="json")
+
+
+@app.post(
+    f"{settings.api_prefix}/policies/{{package_id}}/retire",
+    tags=["policy-governance"],
+)
+async def retire_policy(
+    package_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    return (await policy_service.retire(package_id)).model_dump(mode="json")
+
+
+@app.get(f"{settings.api_prefix}/operations/actions", tags=["operations"])
+async def list_core_actions(
+    status: ActionStatus | None = None,
+    limit: int = 100,
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return [
+        action.model_dump(mode="json")
+        for action in await core_store.list_actions(status=status, limit=min(limit, 1000))
+    ]
+
+
+@app.get(f"{settings.api_prefix}/operations/outbox", tags=["operations"])
+async def list_core_outbox(
+    status: OutboxStatus | None = None,
+    limit: int = 100,
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return [
+        record.model_dump(mode="json")
+        for record in await core_store.list_outbox(status=status, limit=min(limit, 1000))
+    ]
+
+
+@app.get(
+    f"{settings.api_prefix}/operations/actions/{{action_id}}/events",
+    tags=["operations"],
+)
+async def list_core_action_events(
+    action_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    action = await core_store.get_action(action_id)
+    if action is None:
+        raise NotFoundError("Action", action_id)
+    return await core_store.list_action_events(action_id)
+
+
+@app.get(
+    f"{settings.api_prefix}/operations/conversation-quarantine",
+    tags=["operations"],
+)
+async def list_conversation_quarantine(
+    limit: int = 100,
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return await core_store.list_quarantined_messages(limit=min(limit, 1000))
+
+
+@app.get(f"{settings.api_prefix}/operations/delivery-receipts", tags=["operations"])
+async def list_delivery_receipts(
+    limit: int = 100,
+    actor: UserContext = Depends(get_current_user),
+) -> list[dict]:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return [
+        receipt.model_dump(mode="json")
+        for receipt in await delivery_receipts.list(limit=min(limit, 1000))
+    ]
+
+
+@app.get(f"{settings.api_prefix}/operations/audit-integrity", tags=["operations"])
+async def verify_audit_integrity(
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_READ)
+    return await AuditRepository.verify_chain()
+
+
+@app.post(f"{settings.api_prefix}/operations/workers/actions:run", tags=["operations"])
+async def run_action_worker(
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    return (await action_worker.run_once()).__dict__
+
+
+@app.post(
+    f"{settings.api_prefix}/operations/workers/reconciliation:run",
+    tags=["operations"],
+)
+async def run_reconciliation_worker(
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    _require_permission(actor, Permission.ADMIN_WRITE)
+    return (await reconciliation_worker.run_once()).__dict__
+
+
+if settings.is_dev:
+
+    @app.put(
+        f"{settings.api_prefix}/dev/sandbox/resources",
+        tags=["sandbox-development"],
+        summary="Seed an authoritative upstream resource for deterministic development",
+    )
+    async def put_sandbox_resource(
+        request: SandboxResourceRequest,
+        actor: UserContext = Depends(get_current_user),
+    ) -> dict:
+        _require_permission(actor, Permission.ADMIN_WRITE)
+        return await sandbox_action_connector.put_resource(
+            request.resource_type, request.resource_id, request.payload
+        )
+
+
+    @app.put(
+        f"{settings.api_prefix}/dev/sandbox/action-scenarios",
+        tags=["sandbox-development"],
+        summary="Configure a deterministic action-provider failure scenario",
+    )
+    async def put_sandbox_scenario(
+        request: SandboxScenarioRequest,
+        actor: UserContext = Depends(get_current_user),
+    ) -> dict:
+        _require_permission(actor, Permission.ADMIN_WRITE)
+        await sandbox_action_connector.set_scenario(
+            request.idempotency_key, request.scenario
+        )
+        return request.model_dump(mode="json")
 
 
 @app.get(f"{settings.api_prefix}/procedures", response_model=ProceduresResponse, tags=["procedures"])
@@ -622,7 +1392,7 @@ async def get_table_data_v1(table_name: str, limit: int = 100, offset: int = 0) 
 
 @app.websocket(f"{settings.api_prefix}/ws/chat")
 async def websocket_chat(websocket: WebSocket):
-    """WebSocket endpoint for real-time streaming agent responses."""
+    """WebSocket chat using the same complete response-safety path as REST."""
     if settings.auth_enabled:
         auth_header = websocket.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
@@ -643,94 +1413,71 @@ async def websocket_chat(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            inbound = await ws_channel.receive(data)
+            try:
+                frame = WebSocketTurnFrame.model_validate(data)
+            except PydanticValidationError as exc:
+                await websocket.send_json(
+                    {
+                        "type": "validation_error",
+                        "errors": exc.errors(include_url=False, include_input=False),
+                    }
+                )
+                continue
+            inbound = await ws_channel.receive(frame.model_dump(mode="json"))
             customer = resolve_customer_context(actor, inbound.user_id)
 
             session_id = inbound.session_id or str(uuid.uuid4())
             customer_id = customer.customer_id
             owner_id = session_owner_id(actor.user_id, customer_id)
             await core_store.initialize()
-            accepted = await conversation_runtime.accept(
+            result = await conversation_service.process_turn(
                 MessageEnvelope(
+                    provider_id=(
+                        frame.provider_id
+                        if actor.role in {Role.ADMIN, Role.INTEGRATION}
+                        else "direct-websocket"
+                    ),
                     message_id=inbound.channel_message_id or f"ws:{uuid.uuid4().hex}",
                     conversation_id=session_id,
                     customer_id=customer_id,
                     channel=ChannelKind.CHAT,
                     text=inbound.text,
-                )
+                    sequence=frame.sequence,
+                    locale=frame.locale,
+                    timezone=frame.timezone,
+                    consent_snapshot=frame.consent_snapshot,
+                ),
+                actor_id=actor.user_id,
+                actor_role=actor.role.value,
+                actor_permissions=sorted(actor.permissions),
+                owner_id=owner_id,
             )
-            if not accepted:
+            if result.duplicate:
                 await websocket.send_json({
                     "type": "duplicate_suppressed",
                     "session_id": session_id,
                 })
                 continue
-
-            with LogContext(session_id=session_id, user_id=actor.user_id):
-                # Get or create session
-                session = await session_service.get_session(
-                    app_name=settings.app_name,
-                    user_id=owner_id,
-                    session_id=session_id,
+            if result.quarantined:
+                await websocket.send_json(
+                    {
+                        "type": "message_quarantined",
+                        "session_id": session_id,
+                        "message_id": result.message_id,
+                        "reason": "provider_sequence_gap",
+                    }
                 )
-                if session is None:
-                    session = await session_service.create_session(
-                        app_name=settings.app_name,
-                        user_id=owner_id,
-                        session_id=session_id,
-                        state={
-                            "customer_id": customer_id,
-                            "actor_id": actor.user_id,
-                            "actor_role": actor.role.value,
-                            "actor_permissions": sorted(actor.permissions),
-                            "current_date": date.today().isoformat(),
-                        },
-                    )
-
-                if not session.state.get("customer_id"):
-                    session.state["customer_id"] = customer_id
-                session.state["current_date"] = date.today().isoformat()
-
-                user_message = genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part(text=inbound.text)],
-                )
-
-                # Stream responses as they arrive
-                async for event in runner.run_async(
-                    user_id=owner_id,
-                    session_id=session_id,
-                    new_message=user_message,
-                ):
-                    if (
-                        event.author != "router_agent"
-                        and event.content
-                        and event.content.parts
-                    ):
-                        for part in event.content.parts:
-                            if part.text:
-                                # Apply guardrails before sending to client
-                                filtered_text, violations = filter_response(part.text)
-                                if violations:
-                                    logger.warning(
-                                        "Guardrail violations filtered from WS stream (session=%s): %s",
-                                        session_id,
-                                        [v.rule for v in violations],
-                                    )
-                                msg = OutboundMessage(
-                                    channel=ChannelType.WEBSOCKET,
-                                    user_id=customer_id,
-                                    session_id=session_id,
-                                    text=filtered_text,
-                                )
-                                frame = await ws_channel.format_response(msg)
-                                await websocket.send_json(frame)
-
-                # Send completion marker
-                await websocket.send_json({
-                    "type": "stream_end",
+                continue
+            await websocket.send_json(
+                {
+                    "type": "agent_response",
                     "session_id": session_id,
-                })
+                    "text": result.response,
+                    "risk": result.risk.value,
+                    "may_stream": result.may_stream,
+                }
+            )
+            await websocket.send_json({"type": "stream_end", "session_id": session_id})
 
     except WebSocketDisconnect:
         logger.info("WebSocket connection closed")
@@ -760,15 +1507,36 @@ async def get_session_procedure_v1(session_id: str) -> dict:
 
 
 @app.get(f"{settings.api_prefix}/metrics", tags=["system"])
-async def metrics_v1() -> dict:
+async def metrics_v1(
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
     """Basic operational metrics for monitoring dashboards."""
+    _require_permission(actor, Permission.ADMIN_READ)
     active_procedures = executor_registry.list_active()
+    await core_store.initialize()
+    actions = await core_store.list_actions(limit=1000)
+    outbox = await core_store.list_outbox(limit=1000)
+    action_counts = {
+        status.value: sum(action.status is status for action in actions)
+        for status in ActionStatus
+    }
+    outbox_counts = {
+        status.value: sum(record.status is status for record in outbox)
+        for status in OutboxStatus
+    }
     return {
         "procedures_loaded": len(registry.procedures),
         "active_procedures": len(active_procedures),
         "auth_enabled": settings.auth_enabled,
         "rate_limit_enabled": settings.rate_limit_enabled,
         "environment": settings.environment.value,
+        "upstream_mode": settings.effective_upstream_mode.value,
+        "jurisdiction_profile": jurisdiction_profile.profile_id,
+        "actions": action_counts,
+        "outbox": outbox_counts,
+        "active_policy_packages": len(
+            await policy_repository.list(PolicyLifecycle.ACTIVE)
+        ),
     }
 
 
@@ -833,4 +1601,7 @@ async def health() -> HealthResponse:
         environment=settings.environment.value,
         procedures_loaded=len(registry.procedures),
         auth_enabled=settings.auth_enabled,
+        upstream_mode=settings.effective_upstream_mode.value,
+        jurisdiction_profile=jurisdiction_profile.profile_id,
     )
+    SQLiteDeliveryReceiptStore,

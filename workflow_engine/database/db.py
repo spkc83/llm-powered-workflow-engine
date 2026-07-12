@@ -233,6 +233,11 @@ def configure_db_path(path: Path) -> None:
     """Override the default database path (called from settings at startup)."""
     global DB_PATH
     DB_PATH = path
+    # seed.py retains a compatibility module variable used by existing tests and
+    # standalone tooling; keep it synchronized with the configured repository DB.
+    from workflow_engine.database import seed as seed_module
+
+    seed_module.DB_PATH = path
     logger.info("Database path configured: %s", DB_PATH)
 
 
@@ -266,6 +271,7 @@ async def init_db() -> Path:
     """Create all tables if they don't exist. Returns the DB path."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         await db.executescript(_SCHEMA)
         # Phase 1 idempotency migration: historical prototype data could contain
         # duplicate refunds for one order. Keep the earliest record, then enforce
@@ -277,6 +283,53 @@ async def init_db() -> Path:
         await db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id)"
         )
+        audit_columns = {
+            row[1] for row in await (await db.execute("PRAGMA table_info(audit_trail)")).fetchall()
+        }
+        if "previous_hash" not in audit_columns:
+            try:
+                await db.execute("ALTER TABLE audit_trail ADD COLUMN previous_hash TEXT")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        if "entry_hash" not in audit_columns:
+            try:
+                await db.execute("ALTER TABLE audit_trail ADD COLUMN entry_hash TEXT")
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        # One-time v2 -> v3 backfill. Once a row has a hash, startup never
+        # recalculates it, so later content tampering remains detectable.
+        import hashlib
+        import json
+
+        previous_hash = "GENESIS"
+        audit_rows = await (await db.execute(
+            "SELECT rowid,* FROM audit_trail ORDER BY rowid"
+        )).fetchall()
+        for row in audit_rows:
+            data = dict(row)
+            if data.get("entry_hash"):
+                previous_hash = data["entry_hash"]
+                continue
+            entry = {
+                key: data.get(key)
+                for key in (
+                    "entry_id", "timestamp", "action", "actor", "resource_type",
+                    "resource_id", "correlation_id", "session_id", "procedure_id", "step_id",
+                )
+                if data.get(key) is not None
+            }
+            for key in ("before_state", "after_state", "metadata"):
+                if data.get(key):
+                    entry[key] = json.loads(data[key])
+            canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+            entry_hash = hashlib.sha256(f"{previous_hash}:{canonical}".encode()).hexdigest()
+            await db.execute(
+                "UPDATE audit_trail SET previous_hash=?,entry_hash=? WHERE rowid=?",
+                (previous_hash, entry_hash, data["rowid"]),
+            )
+            previous_hash = entry_hash
         await db.commit()
     logger.info("Database initialized at %s", DB_PATH)
     return DB_PATH

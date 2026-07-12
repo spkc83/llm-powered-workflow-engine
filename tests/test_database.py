@@ -4,6 +4,7 @@ import pytest
 
 from workflow_engine.database.db import execute, init_db, query_all, query_one
 from workflow_engine.database.seed import seed_all
+from workflow_engine.database.repository import AuditRepository
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +60,40 @@ class TestInitDb:
         rows = await query_all("PRAGMA table_info(orders)")
         column_names = [r["name"] for r in rows]
         assert "merchant_name" in column_names
+
+    @pytest.mark.asyncio
+    async def test_audit_hash_chain_detects_content_tampering(self):
+        await init_db()
+        await AuditRepository.write(
+            {
+                "entry_id": "AUD-1",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "action": "case.updated",
+                "actor": "rep-1",
+                "resource_type": "case",
+                "resource_id": "CASE-1",
+                "metadata": {"status": "open"},
+            }
+        )
+        await AuditRepository.write(
+            {
+                "entry_id": "AUD-2",
+                "timestamp": "2026-01-01T00:01:00+00:00",
+                "action": "case.updated",
+                "actor": "rep-1",
+                "resource_type": "case",
+                "resource_id": "CASE-1",
+                "metadata": {"status": "closed"},
+            }
+        )
+        assert (await AuditRepository.verify_chain())["valid"] is True
+
+        await execute(
+            "UPDATE audit_trail SET actor='tampered' WHERE entry_id='AUD-1'"
+        )
+        result = await AuditRepository.verify_chain()
+        assert result["valid"] is False
+        assert result["broken_entry_id"] == "AUD-1"
 
 
 # ---------------------------------------------------------------------------

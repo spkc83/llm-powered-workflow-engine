@@ -15,6 +15,7 @@ class Role(str, Enum):
     FRAUD_ANALYST = "fraud_analyst"
     READONLY = "readonly"
     CUSTOMER = "customer"
+    INTEGRATION = "integration"
 
 
 class Permission(str, Enum):
@@ -44,6 +45,11 @@ class Permission(str, Enum):
     TABLE_BROWSE = "table:browse"
     SESSION_READ = "session:read"
     PROCEDURE_READ = "procedure:read"
+
+    # Provider/service identities
+    CHANNEL_INGEST = "channel:ingest"
+    CHANNEL_DELIVERY = "channel:delivery"
+    PROVIDER_CALLBACK = "provider:callback"
 
 
 class TokenPayload(BaseModel):
