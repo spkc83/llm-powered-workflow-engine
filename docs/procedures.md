@@ -72,7 +72,7 @@ The agent needs to gather information from the user before proceeding.
 
 ### `tool_call`
 
-The agent calls a tool function to perform an action.
+The agent calls a read/proposal tool. Consequential effects are never executed directly by an ADK tool; the application submits a typed gateway command after deterministic checks.
 
 ```yaml
 - id: lookup_order
@@ -179,7 +179,9 @@ Invalid procedures raise `ValueError` at load time with a descriptive message.
 
 - **Procedure IDs**: Use domain prefix — `cs_` for customer service, `fraud_` for fraud ops
 - **Step IDs**: Use snake_case descriptive names (e.g., `greet_and_collect`, `assess_risk`)
-- **Tool names**: Must match the Python function name in the tool module
+- **Tool names**: Must match a classified read/proposal tool. Consequential action
+  names must also exist in the closed action specification and active policy
+  allow-list.
 
 ## Instruction Writing Tips
 
@@ -252,3 +254,24 @@ source control.
 For compound intents, the deterministic router selects one primary procedure and
 explicit subprocedures, then locks every version for the case. It never silently
 switches an active case to a newer policy version.
+
+
+## v3 consequential-action authoring
+
+A procedure step may gather inputs or propose `issue_store_credit`,
+`update_case_status`, `file_eft_dispute`, `issue_provisional_credit`,
+`escalate_to_supervisor`, `add_case_note`, `flag_account`, `submit_sar`, or
+`close_alert`. It does not make that proposal authoritative. Add or change a
+consequential action only with all of the following:
+
+1. a discriminated Pydantic payload in `core/action_service.py`;
+2. an `ActionSpecification` declaring required/authoritative parameters and
+   consent/approval;
+3. RBAC permission and tool-catalog classification;
+4. an active signed policy `allowed_actions` entry;
+5. authoritative resource and provider connector adapters;
+6. idempotency, post-commit timeout, reconciliation, and adversarial tests;
+7. API, integration, operator, user, migration, and release documentation.
+
+SAR narratives are referenced through a secure `narrative_ref`; do not place
+regulated narrative text in procedure YAML, prompts, or generic action payloads.

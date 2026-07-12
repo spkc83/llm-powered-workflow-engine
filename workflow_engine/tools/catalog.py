@@ -35,6 +35,7 @@ class AuthorizationMode(str, Enum):
 class IdempotencyMode(str, Enum):
     NOT_APPLICABLE = "not_applicable"
     NOT_IMPLEMENTED = "not_implemented"
+    ACTION_GATEWAY = "action_gateway"
 
 
 @dataclass(frozen=True)
@@ -85,8 +86,9 @@ def _action(
         consequential=True,
         required_permission=permission,
         authorization_mode=AuthorizationMode.ACTION_GATEWAY_REQUIRED,
-        idempotency_mode=IdempotencyMode.NOT_IMPLEMENTED,
-        # Phase 0 safety freeze: prompts/callbacks are not an authorization boundary.
+        idempotency_mode=IdempotencyMode.ACTION_GATEWAY,
+        # Models never execute these operations directly. The v3 REST action
+        # service creates a typed command and the independent gateway dispatches it.
         production_model_enabled=False,
     )
 

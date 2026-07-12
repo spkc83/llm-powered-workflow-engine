@@ -8,7 +8,7 @@ changing tools or business code.
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from .db import execute, query_all, query_one
+from .db import execute, get_db, query_all, query_one
 from ..logging_config import get_logger
 
 logger = get_logger("repository")
@@ -388,28 +388,75 @@ class AuditRepository:
 
     @staticmethod
     async def write(entry: dict) -> None:
-        """Persist an audit trail entry to the database."""
+        """Append an entry linked to the prior record by a SHA-256 hash chain."""
+        import hashlib
         import json
-        await execute(
-            """
-            INSERT INTO audit_trail (entry_id, timestamp, action, actor, resource_type,
-                                     resource_id, correlation_id, session_id, procedure_id,
-                                     step_id, before_state, after_state, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                entry.get("entry_id"),
-                entry.get("timestamp"),
-                entry.get("action"),
-                entry.get("actor"),
-                entry.get("resource_type"),
-                entry.get("resource_id"),
-                entry.get("correlation_id"),
-                entry.get("session_id"),
-                entry.get("procedure_id"),
-                entry.get("step_id"),
-                json.dumps(entry.get("before_state")) if entry.get("before_state") else None,
-                json.dumps(entry.get("after_state")) if entry.get("after_state") else None,
-                json.dumps(entry.get("metadata")) if entry.get("metadata") else None,
-            ),
-        )
+
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        async with get_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            row = await (await db.execute(
+                "SELECT entry_hash FROM audit_trail ORDER BY rowid DESC LIMIT 1"
+            )).fetchone()
+            previous_hash = row[0] if row and row[0] else "GENESIS"
+            entry_hash = hashlib.sha256(
+                f"{previous_hash}:{canonical}".encode()
+            ).hexdigest()
+            await db.execute(
+                """
+                INSERT INTO audit_trail (entry_id, timestamp, action, actor, resource_type,
+                                         resource_id, correlation_id, session_id, procedure_id,
+                                         step_id, before_state, after_state, metadata,
+                                         previous_hash, entry_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.get("entry_id"),
+                    entry.get("timestamp"),
+                    entry.get("action"),
+                    entry.get("actor"),
+                    entry.get("resource_type"),
+                    entry.get("resource_id"),
+                    entry.get("correlation_id"),
+                    entry.get("session_id"),
+                    entry.get("procedure_id"),
+                    entry.get("step_id"),
+                    json.dumps(entry.get("before_state")) if entry.get("before_state") else None,
+                    json.dumps(entry.get("after_state")) if entry.get("after_state") else None,
+                    json.dumps(entry.get("metadata")) if entry.get("metadata") else None,
+                    previous_hash,
+                    entry_hash,
+                ),
+            )
+            await db.commit()
+
+    @staticmethod
+    async def verify_chain() -> dict:
+        """Verify append-order linkage and content hashes for the local audit chain."""
+        import hashlib
+        import json
+
+        rows = await query_all("SELECT * FROM audit_trail ORDER BY rowid")
+        previous_hash = "GENESIS"
+        for index, row in enumerate(rows):
+            entry = {
+                key: row.get(key)
+                for key in (
+                    "entry_id", "timestamp", "action", "actor", "resource_type",
+                    "resource_id", "correlation_id", "session_id", "procedure_id", "step_id",
+                )
+                if row.get(key) is not None
+            }
+            for key in ("before_state", "after_state", "metadata"):
+                if row.get(key):
+                    entry[key] = json.loads(row[key])
+            canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+            expected = hashlib.sha256(f"{previous_hash}:{canonical}".encode()).hexdigest()
+            if row.get("previous_hash") != previous_hash or row.get("entry_hash") != expected:
+                return {
+                    "valid": False,
+                    "checked": index,
+                    "broken_entry_id": row.get("entry_id"),
+                }
+            previous_hash = expected
+        return {"valid": True, "checked": len(rows), "head_hash": previous_hash}

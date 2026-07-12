@@ -58,6 +58,14 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
     # Self-service customers are authorized by resource ownership rather than
     # broad staff permissions.
     Role.CUSTOMER: set(),
+
+    Role.INTEGRATION: {
+        Permission.CUSTOMER_READ,
+        Permission.CASE_READ,
+        Permission.CHANNEL_INGEST,
+        Permission.CHANNEL_DELIVERY,
+        Permission.PROVIDER_CALLBACK,
+    },
 }
 
 

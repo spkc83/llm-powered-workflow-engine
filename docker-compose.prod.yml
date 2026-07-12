@@ -13,10 +13,17 @@ services:
       - RATE_LIMIT_ENABLED=true
       - RATE_LIMIT_REQUESTS=100
       - RATE_LIMIT_WINDOW_SECONDS=60
+      - UPSTREAM_MODE=disabled
+      - JURISDICTION_ENFORCE=true
+      - SEED_REFERENCE_DATA=false
       # Override with real secret in production
       # - AUTH_SECRET_KEY=your-production-secret
-      # For PostgreSQL in production:
+      # - POLICY_SIGNING_KEY=secret-manager-value
+      # - POLICY_SIGNING_KEY_ID=policy-key-2026-01
+      # A PostgreSQL deployment must register conforming CoreStore and
+      # PolicyRepository adapters before using these URLs:
       # - DATABASE_URL=postgresql+asyncpg://user:pass@db:5432/workflow
+      # - POLICY_DATABASE_URL=postgresql+asyncpg://user:pass@db:5432/workflow
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
     deploy:
       resources:

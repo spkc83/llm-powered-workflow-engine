@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.0.0] - 2026-07-12
+
+### Added
+- One REST/WebSocket/IVR conversation service, provider-scoped dedupe, and sequence quarantine.
+- Atomic action outbox, lease worker, retry quarantine, and reconciliation worker.
+- Closed typed contracts for all cataloged consequential action families.
+- Durable policy repository, signing key IDs, approval/activation/retirement APIs.
+- Provider-neutral STT, TTS, telephony, chat, action, and human-agent interfaces.
+- Truthful SQLite development sandbox with failure injection and delivery receipts.
+- Configurable NAM operational controls and audit hash-chain verification.
+- Swagger schemas/examples, operational APIs, and detailed integration documentation.
+
+### Changed
+- Upgraded Google ADK to 2.4.0, Starlette to 1.3.1, PyJWT to 2.13.0,
+  pytest to 9.1.1, and pytest-asyncio to 1.4.0 after dependency audit.
+- WebSocket responses now use the complete safety pipeline and buffer consequential output.
+- Production defaults to disabled upstream adapters and rejects sandbox mode.
+- Tool catalog records gateway-enforced idempotency for consequential operations.
+
+### Security
+- Client values cannot self-declare verified action parameters; adapters reload authoritative resources.
+- Post-commit provider timeouts reconcile without duplicate dispatch.
+- Stale dispatched attempts reconcile after process death without redispatch, and
+  delayed actions remain verifiable against retired signed policy history.
+- Secret DTMF is redacted by the development STT contract.
+
 ## [2.0.0] - 2026-07-12
 
 ### Added

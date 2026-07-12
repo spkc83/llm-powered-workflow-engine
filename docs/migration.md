@@ -1,31 +1,48 @@
-# Migration to v2.0.0
+# Migration from v2.0 to v3.0
 
-## Breaking changes
+## Major changes
 
-- Google ADK is pinned to 2.1.0.
-- ADK `DatabaseSessionService` now uses an async SQLAlchemy URL.
-- ADK sessions move from the domain database to
-  `ADK_SESSION_DATABASE_URL` (`data/adk_sessions_v2.db` by default).
-- Request `user_id` means serviced customer; JWT subject remains the actor.
-- Production consequential model tools are frozen unless routed through the
-  action gateway.
-- Refunds are unique by order and execute through `/api/v1/core/refunds` or the
-  gateway-backed tool.
+- REST, WebSocket, and canonical IVR turns use one `ConversationService` pipeline.
+- Inbox identity is `(provider_id, message_id)` and optional sequences can be
+  quarantined.
+- All consequential action types have closed schemas and gateway specifications.
+- Action authorization atomically creates a durable outbox record.
+- Unknown outcomes have a reconciliation worker and operational APIs.
+- Policy packages persist across restart and carry signing key IDs.
+- STT, TTS, telephony, chat delivery, action, and human-agent ports have sandbox
+  implementations and Swagger contracts.
+- NAM operational controls are configurable and enforced outside development by
+  default.
+- Audit records form a SHA-256 chain.
+
+## Configuration additions
+
+Review `.env.example`: `POLICY_DATABASE_URL`, `POLICY_SIGNING_KEY_ID`,
+`UPSTREAM_MODE`, `SANDBOX_DATABASE_URL`, worker lease/reconciliation settings,
+`JURISDICTION_CONFIG_PATH`, and `JURISDICTION_ENFORCE`.
+
+Do not set sandbox mode in production. `provider` mode requires deployment wiring
+for real ports; the reference app remains fail closed otherwise.
 
 ## Upgrade procedure
 
-1. Back up `data/workflow.db` and the previous ADK session tables.
-2. Install from `requirements.txt`; verify `google-adk==2.1.0`.
-3. Configure `ADK_SESSION_DATABASE_URL` to a new empty database.
-4. Run `python -m workflow_engine.database`. Historical duplicate prototype
-   refunds are reduced to the earliest record per order before the unique index.
-5. Start the API and execute health, identity, chat dedupe, IVR, refund idempotency,
-   and reconciliation smoke tests.
-6. Preserve the old ADK database read-only for the approved retention period; do
-   not import incompatible 1.9 events into the 2.x tables.
+1. Stop v2 action processing and back up domain/core and ADK databases.
+2. Deploy v3 with `UPSTREAM_MODE=disabled`.
+3. Run `python -m workflow_engine.database`; it adds audit hash columns and performs
+   a one-time hash backfill for pre-v3 rows.
+   Core-store startup also creates `action_events` and marks reconstructed
+   pre-v3 lifecycle evidence with `{"migrated": true}`.
+4. Start once and verify policy packages persist and signatures validate.
+5. Verify health, audit integrity, inbox dedupe, sequence quarantine, outbox lease,
+   post-commit timeout reconciliation, and handoff transitions.
+6. Implement and test real adapters against `docs/integration-guide.md`.
+7. Canary one procedure/channel before enabling each provider or action.
+
+The old inbox tables remain for migration history; v3 uses
+`conversation_inbox_v3`. Do not delete old evidence until retention approval.
 
 ## Rollback
 
-Stop v2 workers, restore the database backup, restore the previous dependency set,
-and point the previous application at its original ADK session store. Do not allow
-both versions to dispatch consequential actions concurrently.
+Stop v3 workers, disable provider callbacks, restore the database backup, and start
+v2 with its original policy/session configuration. Effects already committed by an
+upstream provider remain real; reconcile them before replaying work after rollback.

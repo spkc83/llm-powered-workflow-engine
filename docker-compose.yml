@@ -17,6 +17,11 @@ services:
       - AUTH_ENABLED=false
       - RATE_LIMIT_ENABLED=false
       - DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - REFERENCE_DATA_DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - SEED_REFERENCE_DATA=true
+      - POLICY_DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - UPSTREAM_MODE=sandbox
+      - SANDBOX_DATABASE_URL=sqlite+aiosqlite:///data/upstream_sandbox.db
     volumes:
       - ./data:/app/data
       - ./procedures:/app/procedures
