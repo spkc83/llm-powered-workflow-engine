@@ -1,5 +1,9 @@
 # Changelog
 
+## Documentation and licensing
+
+- Added an explicit MIT license and contributor attribution policy.
+
 ## [3.0.0] - 2026-07-12
 
 ### Added

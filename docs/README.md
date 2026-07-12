@@ -1,5 +1,9 @@
 # Documentation
 
+This documentation describes v3.0.0. Provider implementations, deployment
+credentials, and jurisdiction approvals remain deployment-specific; the
+repository ships only provider-neutral contracts and truthful local adapters.
+
 ## Start here
 
 - [Product and architecture overview](../README.md)
@@ -13,6 +17,8 @@
 - [Core engine](core-engine.md)
 - [Storage and database adapters](database.md)
 - [Procedure and policy authoring](procedures.md)
+- [Contributors and attribution](../CONTRIBUTORS.md)
+- [License](../LICENSE)
 - [Migration from v2 to v3](migration.md)
 
 ## Operate and govern

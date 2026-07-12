@@ -1,5 +1,9 @@
 # Contributing
 
+The project is maintained by **spkc83** and is released under the MIT License.
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for attribution and the project
+ownership model.
+
 1. Work on a focused branch; add regression tests before behavior changes.
 2. Keep ADK/model proposals separate from authoritative facts and effects.
 3. Classify every model-visible tool; consequential tools stay production-frozen.

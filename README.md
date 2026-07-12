@@ -536,8 +536,8 @@ uvicorn main:app --port 8000 --reload
 # Docker
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
-# Or directly with Gunicorn
-gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+# Or directly with Uvicorn
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Production checklist:
@@ -547,8 +547,11 @@ Production checklist:
 - [ ] Enable `RATE_LIMIT_ENABLED=true`
 - [ ] Configure `CORS_ORIGINS` for your domain
 - [ ] Set `LOG_FORMAT=json` for structured log aggregation
-- [ ] Use PostgreSQL for the database (`DATABASE_URL=postgresql+asyncpg://...`)
+- [ ] Register and validate a production database adapter (SQLite remains the
+      built-in fallback; see [database adapter guidance](docs/database.md))
 
 ## License
 
-This project is for educational and learning purposes.
+This project is licensed under the [MIT License](LICENSE). See
+[CONTRIBUTORS.md](CONTRIBUTORS.md) for current maintainer and development
+assistance attribution.
