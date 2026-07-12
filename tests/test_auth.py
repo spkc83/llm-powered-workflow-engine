@@ -6,7 +6,8 @@ from datetime import timedelta
 from workflow_engine.auth.models import Role, Permission, UserContext
 from workflow_engine.auth.rbac import get_permissions_for_role, build_user_context, ROLE_PERMISSIONS
 from workflow_engine.auth.jwt_handler import create_access_token, decode_access_token
-from workflow_engine.errors import AuthenticationError
+from workflow_engine.auth.context import resolve_customer_context, session_owner_id
+from workflow_engine.errors import AuthenticationError, AuthorizationError
 
 
 class TestRolePermissions:
@@ -79,3 +80,23 @@ class TestJWTHandler:
     def test_invalid_token_raises(self):
         with pytest.raises(AuthenticationError):
             decode_access_token("not-a-valid-token")
+
+    def test_customer_token_is_bound_to_own_customer(self):
+        token = create_access_token("CUST-456", Role.CUSTOMER)
+        user = decode_access_token(token)
+        context = resolve_customer_context(user, "CUST-456")
+        assert context.customer_id == "CUST-456"
+
+    def test_customer_token_cannot_impersonate_another_customer(self):
+        token = create_access_token("CUST-456", Role.CUSTOMER)
+        user = decode_access_token(token)
+        with pytest.raises(AuthorizationError):
+            resolve_customer_context(user, "CUST-789")
+
+    def test_staff_requires_customer_read_permission_for_delegation(self):
+        user = UserContext(user_id="rep-1", role=Role.READONLY, permissions=set())
+        with pytest.raises(AuthorizationError):
+            resolve_customer_context(user, "CUST-456")
+
+    def test_session_owner_separates_actor_and_customer(self):
+        assert session_owner_id("rep-1", "CUST-456") != session_owner_id("rep-1", "CUST-789")

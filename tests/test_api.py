@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from httpx import AsyncClient, ASGITransport
 
 
@@ -140,7 +140,7 @@ class TestSessionStateEndpoint:
         sid = f"test-session-{uuid.uuid4().hex[:8]}"
         await m.session_service.create_session(
             app_name="workflow_engine",
-            user_id="test-user",
+            user_id="actor:dev-user:customer:test-user",
             session_id=sid,
         )
         resp = await client.get(
@@ -199,7 +199,7 @@ class TestSessionStateEndpointShape:
         sid = f"test-session-{uuid.uuid4().hex[:8]}"
         await m.session_service.create_session(
             app_name="workflow_engine",
-            user_id="test-user-2",
+            user_id="actor:dev-user:customer:test-user-2",
             session_id=sid,
         )
         resp = await client.get(
@@ -211,3 +211,57 @@ class TestSessionStateEndpointShape:
         assert "state" in data
         assert data["session_id"] == sid
         assert isinstance(data["state"], dict)
+
+
+class TestCoreRefundEndpoint:
+    @pytest.mark.asyncio
+    async def test_refund_uses_authoritative_gateway_and_is_idempotent(self, client):
+        payload = {
+            "customer_id": "CUST-456",
+            "order_id": "ORD-123",
+            "reason": "customer confirmed damaged item",
+            "consent_evidence_ref": "chat-message:consent-1",
+        }
+        first = await client.post("/api/v1/core/refunds", json=payload)
+        second = await client.post("/api/v1/core/refunds", json=payload)
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["action_id"] == second.json()["action_id"]
+        assert first.json()["status"] == "succeeded"
+
+    @pytest.mark.asyncio
+    async def test_refund_hides_orders_owned_by_another_customer(self, client):
+        response = await client.post(
+            "/api/v1/core/refunds",
+            json={
+                "customer_id": "CUST-789",
+                "order_id": "ORD-123",
+                "reason": "attempted cross-customer refund",
+                "consent_evidence_ref": "chat-message:consent-2",
+            },
+        )
+        assert response.status_code == 404
+
+
+class TestIvrEndpoint:
+    @pytest.mark.asyncio
+    async def test_low_confidence_turn_requires_readback_and_dedupes(self, client):
+        payload = {
+            "message_id": f"ivr-{uuid.uuid4().hex}",
+            "conversation_id": "CALL-1",
+            "customer_id": "CUST-456",
+            "transcript": "refund order one two three",
+            "asr_confidence": 0.62,
+            "interrupted": False,
+        }
+        first = await client.post("/api/v1/ivr/turns", json=payload)
+        duplicate = await client.post("/api/v1/ivr/turns", json=payload)
+
+        assert first.status_code == 200
+        assert first.json() == {
+            "accepted": True,
+            "requires_readback": True,
+            "proposed_authority": "asserted",
+        }
+        assert duplicate.json()["accepted"] is False

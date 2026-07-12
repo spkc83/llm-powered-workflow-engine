@@ -18,8 +18,9 @@ from typing import Optional
 from google.adk.tools import ToolContext
 
 from workflow_engine.audit import AuditAction, get_audit_logger
-from workflow_engine.database.repository import DisputeRepository, TransactionRepository
+from workflow_engine.database.repository import DisputeRepository
 from workflow_engine.logging_config import get_logger
+from workflow_engine.tools.access import authorize_tool
 
 logger = get_logger("tools.dispute")
 
@@ -63,10 +64,14 @@ async def lookup_dispute(dispute_id: str, tool_context: ToolContext) -> dict:
     Args:
         dispute_id: The dispute ID to look up (e.g., "DISP-001").
     """
+    authorize_tool("lookup_dispute", tool_context)
     logger.info("Looking up dispute: %s", dispute_id)
 
     dispute = await DisputeRepository.get_by_id(dispute_id)
     if dispute is None:
+        return {"error": f"Dispute {dispute_id} not found", "found": False}
+
+    if dispute["customer_id"] != tool_context.state.get("customer_id"):
         return {"error": f"Dispute {dispute_id} not found", "found": False}
 
     result = {**dict(dispute), "found": True}
@@ -114,6 +119,7 @@ async def check_dispute_eligibility(
         days_since_noticed: Days since consumer first noticed the unauthorized transfer.
         payment_method: Payment method used (debit_card, ach, wire, p2p, etc.).
     """
+    authorize_tool("check_dispute_eligibility", tool_context)
     logger.info(
         "Checking Reg E eligibility: txn=%s type=%s days=%d method=%s",
         transaction_id, dispute_type, days_since_noticed, payment_method,
@@ -222,6 +228,7 @@ async def file_eft_dispute(
         account_id: Account ID involved (optional).
         payment_method: Payment method (debit_card, ach, wire, p2p).
     """
+    authorize_tool("file_eft_dispute", tool_context, customer_id=customer_id)
     now = datetime.now()
     dispute_id = f"DISP-{now.strftime('%Y%m%d%H%M%S')}"
 
@@ -330,6 +337,7 @@ async def issue_provisional_credit(
     Args:
         dispute_id: The dispute to issue provisional credit for.
     """
+    authorize_tool("issue_provisional_credit", tool_context)
     dispute_data = tool_context.state.get("dispute_data", {})
     amount = dispute_data.get("amount", 0)
     max_liability = dispute_data.get("max_liability", 50.00)

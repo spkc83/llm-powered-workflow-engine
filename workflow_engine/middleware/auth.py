@@ -40,7 +40,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not settings.auth_enabled:
             # Dev mode: create default admin context
             user = build_user_context(
-                user_id=request.query_params.get("user_id", "dev-user"),
+                user_id="dev-user",
                 role=Role.ADMIN,
             )
             request.state.user = user

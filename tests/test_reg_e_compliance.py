@@ -7,10 +7,8 @@ Covers:
 - Financial math verification with SymPy
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
-from workflow_engine.agents.compliance import ComplianceChecker, ComplianceViolation
+from workflow_engine.agents.compliance import ComplianceChecker
 from workflow_engine.tools.dispute_tools import (
     _calculate_liability_tier,
     _is_eft_covered,

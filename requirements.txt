@@ -1,3 +1,6 @@
+# Install with the direct-version constraints captured from the Phase 0 baseline.
+-c constraints.txt
+
 # Core framework
 google-adk
 fastapi

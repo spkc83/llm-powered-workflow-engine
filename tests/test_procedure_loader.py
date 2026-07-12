@@ -1,12 +1,8 @@
 """Tests for procedure YAML loader and instruction builder."""
 import pytest
-from pathlib import Path
-import tempfile
-import os
 
 from workflow_engine.procedures.loader import (
     load_procedure,
-    validate_procedure,
     build_agent_instructions,
     get_procedure_tools,
 )

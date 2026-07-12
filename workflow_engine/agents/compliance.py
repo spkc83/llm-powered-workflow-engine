@@ -198,7 +198,6 @@ class ComplianceChecker:
             return violations
 
         # --- Liability amount verification (SymPy) ---
-        tier = eligibility.get("liability_tier") or dispute_data.get("liability_tier")
         max_liability = eligibility.get("max_liability") or dispute_data.get("max_liability")
         disputed_amount = dispute_data.get("amount")
 

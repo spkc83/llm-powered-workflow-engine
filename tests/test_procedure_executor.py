@@ -1,7 +1,6 @@
 """Tests for the stateful procedure executor."""
 
 import pytest
-import pytest_asyncio
 
 from workflow_engine.procedures.executor import (
     ProcedureExecutor,
