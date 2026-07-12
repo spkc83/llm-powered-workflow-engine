@@ -89,7 +89,10 @@ cp .env.example .env
 uvicorn main:app --port 8000
 ```
 
-The database (`data/workflow.db`) is automatically created and seeded with sample data on first startup.
+In development, the configured SQLite reference database is created and seeded
+with sample data on first startup. Seeding is disabled by default in production;
+production deployments must provide their own approved reference data and
+provider adapters.
 
 **Chat UI** (Shiny for Python):
 
