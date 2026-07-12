@@ -1,13 +1,10 @@
 """Explicit dotted-path loading for deployment-supplied persistence adapters."""
 
 import importlib
-from typing import Callable, TypeVar, cast
+from typing import Any, Callable, cast
 
 
-Factory = TypeVar("Factory", bound=Callable)
-
-
-def load_factory(specification: str) -> Factory:
+def load_factory(specification: str) -> Callable[..., Any]:
     """Load ``package.module:callable`` from trusted deployment configuration."""
     module_name, separator, attribute = specification.partition(":")
     if not separator or not module_name or not attribute:
@@ -16,4 +13,4 @@ def load_factory(specification: str) -> Factory:
     factory = getattr(module, attribute, None)
     if not callable(factory):
         raise ValueError(f"Configured adapter factory is not callable: {specification}")
-    return cast(Factory, factory)
+    return cast(Callable[..., Any], factory)
