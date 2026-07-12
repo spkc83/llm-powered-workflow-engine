@@ -1,7 +1,6 @@
 """Procedure YAML loader and instruction builder."""
 import yaml
 from pathlib import Path
-from typing import Any
 
 
 def load_procedure(file_path: str) -> dict:
@@ -155,8 +154,8 @@ def build_agent_instructions(procedure: dict, persona: str) -> str:
         if step["action"] == "collect_info" and "required_info" in step:
             info_list = ", ".join(step["required_info"])
             lines.append(f"  → You must collect: {info_list}")
-            lines.append(f"  → IMPORTANT: If this information is already present in the user's message, "
-                         f"skip collection and immediately proceed to the next step.")
+            lines.append("  → IMPORTANT: If this information is already present in the user's message, "
+                         "skip collection and immediately proceed to the next step.")
 
         # Branching conditions
         if step["action"] == "evaluate" and "conditions" in step and step["conditions"]:

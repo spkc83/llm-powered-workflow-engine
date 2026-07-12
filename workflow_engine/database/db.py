@@ -267,6 +267,16 @@ async def init_db() -> Path:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(_SCHEMA)
+        # Phase 1 idempotency migration: historical prototype data could contain
+        # duplicate refunds for one order. Keep the earliest record, then enforce
+        # the business uniqueness invariant at the database boundary.
+        await db.execute(
+            """DELETE FROM refunds
+            WHERE rowid NOT IN (SELECT MIN(rowid) FROM refunds GROUP BY order_id)"""
+        )
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id)"
+        )
         await db.commit()
     logger.info("Database initialized at %s", DB_PATH)
     return DB_PATH

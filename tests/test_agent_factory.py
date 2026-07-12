@@ -73,7 +73,7 @@ class TestCreateFraudOpsAgent:
         assert "fraud" in agent.description.lower()
 
     def test_tool_map_covers_yaml_tools(self, registry):
-        from workflow_engine.agents.fraud_ops import create_fraud_ops_agent, TOOL_MAP
+        from workflow_engine.agents.fraud_ops import TOOL_MAP
         yaml_tools = registry.get_procedure_tool_names("fraud_alert_triage")
         for tool_name in yaml_tools:
             assert tool_name in TOOL_MAP, f"TOOL_MAP missing '{tool_name}'"

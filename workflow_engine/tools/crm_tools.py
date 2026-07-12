@@ -16,6 +16,7 @@ from workflow_engine.database.repository import (
     RefundRepository,
 )
 from workflow_engine.logging_config import get_logger
+from workflow_engine.tools.access import authorize_tool
 
 logger = get_logger("tools.crm")
 
@@ -26,6 +27,7 @@ async def lookup_order(order_id: str, tool_context: ToolContext) -> dict:
     Args:
         order_id: The order ID to look up (e.g., "ORD-123").
     """
+    authorize_tool("lookup_order", tool_context)
     logger.info("Looking up order: %s", order_id)
 
     order = await OrderRepository.get_by_id(order_id)
@@ -92,6 +94,7 @@ async def get_customer_profile(customer_id: str, tool_context: ToolContext) -> d
     Args:
         customer_id: The customer ID to look up (e.g., "CUST-456").
     """
+    authorize_tool("get_customer_profile", tool_context, customer_id=customer_id)
     logger.info("Looking up customer: %s", customer_id)
 
     profile = await CustomerRepository.get_by_id(customer_id)
@@ -110,35 +113,57 @@ async def issue_refund(order_id: str, reason: str, tool_context: ToolContext) ->
         order_id: The order ID to refund.
         reason: The reason for the refund.
     """
-    order_data = tool_context.state.get("order_data", {})
-    amount = order_data.get("total", 0)
-    payment_method = order_data.get("payment_method", "original_payment_method")
+    authorize_tool("issue_refund", tool_context)
+    customer_id = tool_context.state.get("customer_id")
+    consent_ref = tool_context.state.get("refund_consent_evidence")
+    if not customer_id or not consent_ref:
+        return {
+            "error": "Verified customer context and explicit refund consent are required",
+            "status": "not_authorized",
+        }
+    order = await OrderRepository.get_by_id(order_id)
+    if order is None or order["customer_id"] != customer_id:
+        return {"error": f"Order {order_id} not found", "status": "not_authorized"}
 
-    refund_id = f"REF-{order_id.split('-')[1]}-{datetime.now().strftime('%H%M%S')}"
-    processed_at = datetime.now().isoformat()
+    import hashlib
+    from workflow_engine.core import CaseKernel
+    from workflow_engine.core.connectors import DatabaseRefundConnector
+    from workflow_engine.core.domains import OrderSnapshot, RefundDecisionService
+    from workflow_engine.core.gateway import ActionGateway
+    from workflow_engine.core.kernel import SQLiteCoreStore
+    from workflow_engine.core.service import CoreEngine
+    from workflow_engine.database import db as db_module
 
-    logger.info("Issuing refund %s for order %s (amount=%.2f)", refund_id, order_id, amount)
-
-    await RefundRepository.create(
-        refund_id=refund_id,
-        order_id=order_id,
-        amount=amount,
-        reason=reason,
-        refund_method=payment_method,
-        processed_at=processed_at,
+    store = SQLiteCoreStore(db_module.DB_PATH)
+    await store.initialize()
+    kernel = CaseKernel(store)
+    engine = CoreEngine(
+        kernel,
+        ActionGateway(kernel, {"issue_refund": DatabaseRefundConnector()}),
+        RefundDecisionService(),
     )
-
-    result = {
-        "refund_id": refund_id,
-        "order_id": order_id,
-        "amount": amount,
-        "currency": "USD",
-        "status": "processed",
-        "reason": reason,
-        "refund_method": payment_method,
-        "estimated_days": "5-7 business days",
-        "processed_at": processed_at,
-    }
+    case_id = "CASE-REFUND-" + hashlib.sha256(
+        f"{customer_id}:{order_id}".encode()
+    ).hexdigest()[:16].upper()
+    action = await engine.process_refund(
+        case_id=case_id,
+        authenticated_customer_id=customer_id,
+        actor_id=tool_context.state.get("actor_id", customer_id),
+        policy_package_id=tool_context.state.get("policy_package_id", "refund@1.0.0:NAM"),
+        procedure_version=tool_context.state.get("procedure_version", "1.0.0"),
+        order=OrderSnapshot(
+            order_id=order_id,
+            customer_id=order["customer_id"],
+            status=order["status"],
+            days_since_delivery=order["days_since_delivery"] or 0,
+            amount=order["total"],
+            payment_method=order["payment_method"] or "original_payment_method",
+            evidence_ref=f"orders-db:{order_id}:{order['order_date']}",
+        ),
+        reason=reason,
+        consent_evidence_ref=consent_ref,
+    )
+    result = action.outcome or {"status": action.status.value}
 
     tool_context.state["refund_data"] = result
     tool_context.state["workflow_status"] = "refund_processed"
@@ -149,14 +174,14 @@ async def issue_refund(order_id: str, reason: str, tool_context: ToolContext) ->
         action=AuditAction.REFUND_ISSUED,
         actor=tool_context.state.get("customer_id", "system"),
         resource_type="refund",
-        resource_id=refund_id,
+        resource_id=result.get("refund_id", action.action_id),
         session_id=str(getattr(tool_context, "session_id", None)),
         metadata={
             "order_id": order_id,
-            "amount": amount,
+            "amount": order["total"],
             "currency": "USD",
             "reason": reason,
-            "refund_method": payment_method,
+            "refund_method": order["payment_method"],
         },
     )
 
@@ -287,6 +312,7 @@ async def search_orders(
         amount: Approximate order total (e.g., 80.0 for "about $80"). Matches within ±10%.
         date: Approximate order date in ISO format (e.g., "2026-02-15"). Matches within ±3 days.
     """
+    authorize_tool("search_orders", tool_context, customer_id=customer_id)
     logger.info(
         "Searching orders for customer=%s merchant=%s amount=%s date=%s",
         customer_id, merchant_name, amount, date,

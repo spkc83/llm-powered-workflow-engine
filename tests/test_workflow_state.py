@@ -1,6 +1,5 @@
 """Tests for workflow state management helpers."""
 import pytest
-from datetime import datetime
 
 from workflow_engine.state.workflow_state import (
     initialize_workflow,

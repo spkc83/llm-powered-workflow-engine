@@ -54,11 +54,13 @@ class TestHttpChannel:
             "user_id": "CUST-456",
             "message": "I want a refund",
             "session_id": "s1",
+            "message_id": "provider-1",
         })
         assert isinstance(msg, InboundMessage)
         assert msg.channel == ChannelType.HTTP_REST
         assert msg.user_id == "CUST-456"
         assert msg.text == "I want a refund"
+        assert msg.channel_message_id == "provider-1"
 
     @pytest.mark.asyncio
     async def test_format_response(self):

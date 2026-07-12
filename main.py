@@ -10,6 +10,7 @@ Enterprise-grade application with:
 """
 
 import uuid
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
@@ -19,7 +20,7 @@ from dotenv import load_dotenv
 # Load environment variables before any other imports
 load_dotenv()
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -28,20 +29,35 @@ from google.adk.sessions import DatabaseSessionService
 from google.genai import types as genai_types
 
 from workflow_engine.agent import registry, root_agent
+from workflow_engine import __version__
+from workflow_engine.auth.context import resolve_customer_context, session_owner_id
+from workflow_engine.auth.jwt_handler import decode_access_token
+from workflow_engine.auth.models import Role, UserContext
+from workflow_engine.auth.rbac import build_user_context
 from workflow_engine.agents.guardrails import filter_response, steer_response
 from workflow_engine.audit.logger import init_audit_logger
 from workflow_engine.channels.base import ChannelType, OutboundMessage
 from workflow_engine.channels.http import HttpChannel, WebSocketChannel
 from workflow_engine.database import close_connection, init_db, query_all, seed_all
 from workflow_engine.database.repository import AuditRepository
+from workflow_engine.database.repository import OrderRepository
 from workflow_engine.errors import NotFoundError, ValidationError, WorkflowEngineError
 from workflow_engine.logging_config import LogContext, get_logger, setup_logging
-from workflow_engine.middleware.auth import AuthMiddleware
+from workflow_engine.middleware.auth import AuthMiddleware, get_current_user
 from workflow_engine.middleware.correlation import CorrelationMiddleware
 from workflow_engine.middleware.error_handler import generic_error_handler, workflow_error_handler
 from workflow_engine.middleware.rate_limiter import RateLimiterMiddleware
 from workflow_engine.procedures.executor import ProcedureExecutorRegistry
 from workflow_engine.settings import get_settings
+from workflow_engine.core import CaseKernel, create_core_store
+from workflow_engine.core.connectors import DatabaseRefundConnector
+from workflow_engine.core.domains import OrderSnapshot, RefundDecisionService
+from workflow_engine.core.gateway import ActionGateway
+from workflow_engine.core.service import CoreEngine
+from workflow_engine.core.policy import PolicyPackage, PolicyRegistry, PolicySigner
+from workflow_engine.auth.models import Permission
+from workflow_engine.conversation.runtime import ChannelKind, ConversationRuntime, MessageEnvelope
+from workflow_engine.channels.ivr import IvrAdapter
 
 # --- Initialize logging ---
 settings = get_settings()
@@ -88,6 +104,7 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await init_db()
     await seed_all()
+    await core_store.initialize()
 
     # Initialize audit logger with DB persistence
     init_audit_logger(db_write_func=AuditRepository.write)
@@ -111,7 +128,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LLM Workflow Engine",
     description="Enterprise-grade LLM-powered workflow engine for customer service and fraud operations.",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -156,6 +173,34 @@ runner = Runner(
 # Procedure executor registry — tracks active procedure state machines per session
 executor_registry = ProcedureExecutorRegistry()
 
+# Authoritative core action path. ADK/model code cannot write action records.
+core_store = create_core_store(settings.database_url)
+core_kernel = CaseKernel(core_store)
+policy_signer = PolicySigner(settings.policy_signing_key.encode())
+active_refund_policy = policy_signer.activate(
+    policy_signer.approve(
+        PolicyPackage(
+            package_id=f"refund@1.0.0:{settings.jurisdiction_profile}",
+            procedure_id="cs_refund",
+            version="1.0.0",
+            jurisdiction=settings.jurisdiction_profile,
+            author=settings.policy_author,
+            rules={"refund_window_days": 30, "requires_explicit_consent": True},
+        ),
+        approver=settings.policy_approver,
+    )
+)
+policy_registry = PolicyRegistry(policy_signer)
+policy_registry.load(active_refund_policy)
+core_gateway = ActionGateway(
+    core_kernel,
+    {"issue_refund": DatabaseRefundConnector()},
+    policy_registry=policy_registry,
+)
+core_engine = CoreEngine(core_kernel, core_gateway, RefundDecisionService())
+conversation_runtime = ConversationRuntime(core_store)
+ivr_adapter = IvrAdapter()
+
 
 # --- Pydantic models ---
 
@@ -163,12 +208,45 @@ executor_registry = ProcedureExecutorRegistry()
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=10000, description="User message text")
     session_id: Optional[str] = Field(default=None, description="Existing session ID to continue")
-    user_id: str = Field(min_length=1, max_length=100, description="User identifier")
+    message_id: Optional[str] = Field(default=None, description="Stable provider message ID for dedupe")
+    user_id: str = Field(
+        min_length=1,
+        max_length=100,
+        description="Serviced customer identifier (kept as user_id for client compatibility)",
+    )
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+
+
+class RefundCommandRequest(BaseModel):
+    customer_id: str = Field(min_length=1, max_length=100)
+    order_id: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=3, max_length=1000)
+    consent_evidence_ref: str = Field(min_length=3, max_length=500)
+
+
+class RefundCommandResponse(BaseModel):
+    action_id: str
+    status: str
+    outcome: dict | None
+
+
+class IvrTurnRequest(BaseModel):
+    message_id: str
+    conversation_id: str
+    customer_id: str
+    transcript: str
+    asr_confidence: float = Field(ge=0, le=1)
+    interrupted: bool = False
+
+
+class IvrTurnResponse(BaseModel):
+    accepted: bool
+    requires_readback: bool
+    proposed_authority: str
 
 
 class ProcedureInfo(BaseModel):
@@ -219,7 +297,11 @@ _WORKFLOW_STATE_KEYS = {
 
 
 @app.post(f"{settings.api_prefix}/chat", response_model=ChatResponse, tags=["chat"])
-async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
+async def chat_v1(
+    request: ChatRequest,
+    req: Request,
+    actor: UserContext = Depends(get_current_user),
+) -> ChatResponse:
     """Send a message to the workflow agent and get a response.
 
     If no session_id is provided, a new session is created.
@@ -229,26 +311,49 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
         "message": request.message,
         "user_id": request.user_id,
         "session_id": request.session_id,
+        "message_id": request.message_id,
     })
+    customer = resolve_customer_context(actor, inbound.user_id)
+    owner_id = session_owner_id(actor.user_id, customer.customer_id)
 
     session_id = inbound.session_id or str(uuid.uuid4())
+    await core_store.initialize()
+    accepted = await conversation_runtime.accept(
+        MessageEnvelope(
+            message_id=inbound.channel_message_id or f"local:{uuid.uuid4().hex}",
+            conversation_id=session_id,
+            customer_id=customer.customer_id,
+            channel=ChannelKind.CHAT,
+            text=inbound.text,
+        )
+    )
+    if not accepted:
+        return ChatResponse(response="This message was already received.", session_id=session_id)
 
-    with LogContext(session_id=session_id, user_id=inbound.user_id):
-        logger.info("Chat request from user=%s session=%s", inbound.user_id, session_id)
+    with LogContext(session_id=session_id, user_id=actor.user_id):
+        logger.info(
+            "Chat request actor=%s customer=%s session=%s",
+            actor.user_id,
+            customer.customer_id,
+            session_id,
+        )
 
         # Get or create session
         session = await session_service.get_session(
             app_name=settings.app_name,
-            user_id=inbound.user_id,
+            user_id=owner_id,
             session_id=session_id,
         )
         if session is None:
             session = await session_service.create_session(
                 app_name=settings.app_name,
-                user_id=inbound.user_id,
+                user_id=owner_id,
                 session_id=session_id,
                 state={
                     "customer_id": inbound.user_id,
+                    "actor_id": actor.user_id,
+                    "actor_role": actor.role.value,
+                    "actor_permissions": sorted(actor.permissions),
                     "current_date": date.today().isoformat(),
                 },
             )
@@ -267,7 +372,7 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
         # Run agent and collect response text from sub-agents
         response_parts: list[str] = []
         async for event in runner.run_async(
-            user_id=inbound.user_id,
+            user_id=owner_id,
             session_id=session_id,
             new_message=user_message,
         ):
@@ -332,6 +437,96 @@ async def chat_v1(request: ChatRequest, req: Request) -> ChatResponse:
         return ChatResponse(response=response_text, session_id=session_id)
 
 
+@app.post(
+    f"{settings.api_prefix}/core/refunds",
+    response_model=RefundCommandResponse,
+    tags=["core-actions"],
+)
+async def create_refund_command(
+    request: RefundCommandRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> RefundCommandResponse:
+    """Execute a refund only through the deterministic action gateway."""
+    customer = resolve_customer_context(actor, request.customer_id)
+    if actor.role is not Role.CUSTOMER and not actor.has_permission(Permission.REFUND_WRITE):
+        from workflow_engine.errors import AuthorizationError
+
+        raise AuthorizationError(
+            "Refund command requires refund write permission",
+            required_permission=Permission.REFUND_WRITE.value,
+        )
+    order = await OrderRepository.get_by_id(request.order_id)
+    if order is None or order["customer_id"] != customer.customer_id:
+        raise NotFoundError("Order", request.order_id)
+
+    await core_store.initialize()
+    case_digest = hashlib.sha256(
+        f"{customer.customer_id}:{request.order_id}".encode()
+    ).hexdigest()[:16].upper()
+    result = await core_engine.process_refund(
+        case_id=f"CASE-REFUND-{case_digest}",
+        authenticated_customer_id=customer.customer_id,
+        actor_id=actor.user_id,
+        policy_package_id=active_refund_policy.package_id,
+        procedure_version="1.0.0",
+        order=OrderSnapshot(
+            order_id=order["order_id"],
+            customer_id=order["customer_id"],
+            status=order["status"],
+            days_since_delivery=order["days_since_delivery"] or 0,
+            amount=order["total"],
+            payment_method=order["payment_method"] or "original_payment_method",
+            evidence_ref=f"orders-db:{order['order_id']}:{order['order_date']}",
+        ),
+        reason=request.reason,
+        consent_evidence_ref=request.consent_evidence_ref,
+    )
+    return RefundCommandResponse(
+        action_id=result.action_id,
+        status=result.status.value,
+        outcome=result.outcome,
+    )
+
+
+@app.post(
+    f"{settings.api_prefix}/ivr/turns",
+    response_model=IvrTurnResponse,
+    tags=["ivr"],
+)
+async def accept_ivr_turn(
+    request: IvrTurnRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> IvrTurnResponse:
+    customer = resolve_customer_context(actor, request.customer_id)
+    turn = ivr_adapter.normalize(
+        provider_message_id=request.message_id,
+        conversation_id=request.conversation_id,
+        customer_id=customer.customer_id,
+        transcript=request.transcript,
+        asr_confidence=request.asr_confidence,
+        interrupted=request.interrupted,
+    )
+    await core_store.initialize()
+    accepted = await conversation_runtime.accept(
+        MessageEnvelope(
+            message_id=turn.provider_message_id,
+            conversation_id=turn.conversation_id,
+            customer_id=turn.customer_id,
+            channel=ChannelKind.IVR,
+            text=turn.transcript,
+            capabilities={
+                "asr_confidence": turn.asr_confidence,
+                "interrupted": turn.interrupted,
+            },
+        )
+    )
+    return IvrTurnResponse(
+        accepted=accepted,
+        requires_readback=turn.requires_readback,
+        proposed_authority=turn.proposed_authority.value,
+    )
+
+
 @app.get(f"{settings.api_prefix}/procedures", response_model=ProceduresResponse, tags=["procedures"])
 async def list_procedures_v1() -> ProceduresResponse:
     """List all available procedures with their metadata."""
@@ -354,11 +549,16 @@ async def list_procedures_v1() -> ProceduresResponse:
     response_model=SessionStateResponse,
     tags=["sessions"],
 )
-async def get_session_state_v1(session_id: str, user_id: str) -> SessionStateResponse:
+async def get_session_state_v1(
+    session_id: str,
+    user_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> SessionStateResponse:
     """Get the workflow state for a given session."""
+    customer = resolve_customer_context(actor, user_id)
     session = await session_service.get_session(
         app_name=settings.app_name,
-        user_id=user_id,
+        user_id=session_owner_id(actor.user_id, customer.customer_id),
         session_id=session_id,
     )
     if session is None:
@@ -380,11 +580,15 @@ async def list_customers_v1(limit: int = 100, offset: int = 0) -> dict:
 
 
 @app.get(f"{settings.api_prefix}/sessions", tags=["sessions"])
-async def list_sessions_v1(user_id: str) -> dict:
+async def list_sessions_v1(
+    user_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
     """List all sessions for a user."""
+    customer = resolve_customer_context(actor, user_id)
     resp = await session_service.list_sessions(
         app_name=settings.app_name,
-        user_id=user_id,
+        user_id=session_owner_id(actor.user_id, customer.customer_id),
     )
     result = []
     for s in (resp.sessions if resp and resp.sessions else []):
@@ -419,37 +623,72 @@ async def get_table_data_v1(table_name: str, limit: int = 100, offset: int = 0) 
 @app.websocket(f"{settings.api_prefix}/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     """WebSocket endpoint for real-time streaming agent responses."""
+    if settings.auth_enabled:
+        auth_header = websocket.headers.get("Authorization", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+        if not token:
+            await websocket.close(code=4401, reason="Authentication required")
+            return
+        try:
+            actor = decode_access_token(token)
+        except WorkflowEngineError:
+            await websocket.close(code=4401, reason="Invalid authentication")
+            return
+    else:
+        actor = build_user_context("dev-user", Role.ADMIN)
+
     await websocket.accept()
-    logger.info("WebSocket connection established")
+    logger.info("WebSocket connection established actor=%s", actor.user_id)
 
     try:
         while True:
             data = await websocket.receive_json()
             inbound = await ws_channel.receive(data)
+            customer = resolve_customer_context(actor, inbound.user_id)
 
             session_id = inbound.session_id or str(uuid.uuid4())
-            user_id = inbound.user_id
+            customer_id = customer.customer_id
+            owner_id = session_owner_id(actor.user_id, customer_id)
+            await core_store.initialize()
+            accepted = await conversation_runtime.accept(
+                MessageEnvelope(
+                    message_id=inbound.channel_message_id or f"ws:{uuid.uuid4().hex}",
+                    conversation_id=session_id,
+                    customer_id=customer_id,
+                    channel=ChannelKind.CHAT,
+                    text=inbound.text,
+                )
+            )
+            if not accepted:
+                await websocket.send_json({
+                    "type": "duplicate_suppressed",
+                    "session_id": session_id,
+                })
+                continue
 
-            with LogContext(session_id=session_id, user_id=user_id):
+            with LogContext(session_id=session_id, user_id=actor.user_id):
                 # Get or create session
                 session = await session_service.get_session(
                     app_name=settings.app_name,
-                    user_id=user_id,
+                    user_id=owner_id,
                     session_id=session_id,
                 )
                 if session is None:
                     session = await session_service.create_session(
                         app_name=settings.app_name,
-                        user_id=user_id,
+                        user_id=owner_id,
                         session_id=session_id,
                         state={
-                            "customer_id": user_id,
+                            "customer_id": customer_id,
+                            "actor_id": actor.user_id,
+                            "actor_role": actor.role.value,
+                            "actor_permissions": sorted(actor.permissions),
                             "current_date": date.today().isoformat(),
                         },
                     )
 
                 if not session.state.get("customer_id"):
-                    session.state["customer_id"] = user_id
+                    session.state["customer_id"] = customer_id
                 session.state["current_date"] = date.today().isoformat()
 
                 user_message = genai_types.Content(
@@ -459,7 +698,7 @@ async def websocket_chat(websocket: WebSocket):
 
                 # Stream responses as they arrive
                 async for event in runner.run_async(
-                    user_id=user_id,
+                    user_id=owner_id,
                     session_id=session_id,
                     new_message=user_message,
                 ):
@@ -480,7 +719,7 @@ async def websocket_chat(websocket: WebSocket):
                                     )
                                 msg = OutboundMessage(
                                     channel=ChannelType.WEBSOCKET,
-                                    user_id=user_id,
+                                    user_id=customer_id,
                                     session_id=session_id,
                                     text=filtered_text,
                                 )
@@ -539,9 +778,13 @@ async def metrics_v1() -> dict:
 
 
 @app.post("/api/chat", response_model=ChatResponse, tags=["legacy"], include_in_schema=False)
-async def chat_legacy(request: ChatRequest, req: Request) -> ChatResponse:
+async def chat_legacy(
+    request: ChatRequest,
+    req: Request,
+    actor: UserContext = Depends(get_current_user),
+) -> ChatResponse:
     """Legacy chat endpoint — delegates to v1."""
-    return await chat_v1(request, req)
+    return await chat_v1(request, req, actor)
 
 
 @app.get("/api/procedures", response_model=ProceduresResponse, tags=["legacy"], include_in_schema=False)
@@ -550,8 +793,12 @@ async def list_procedures_legacy() -> ProceduresResponse:
 
 
 @app.get("/api/session/{session_id}/state", response_model=SessionStateResponse, tags=["legacy"], include_in_schema=False)
-async def get_session_state_legacy(session_id: str, user_id: str) -> SessionStateResponse:
-    return await get_session_state_v1(session_id, user_id)
+async def get_session_state_legacy(
+    session_id: str,
+    user_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> SessionStateResponse:
+    return await get_session_state_v1(session_id, user_id, actor)
 
 
 @app.get("/api/customers", tags=["legacy"], include_in_schema=False)
@@ -565,8 +812,11 @@ async def get_table_data_legacy(table_name: str) -> dict:
 
 
 @app.get("/api/sessions", tags=["legacy"], include_in_schema=False)
-async def list_sessions_legacy(user_id: str) -> dict:
-    return await list_sessions_v1(user_id)
+async def list_sessions_legacy(
+    user_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict:
+    return await list_sessions_v1(user_id, actor)
 
 
 # ===========================================================================
@@ -579,7 +829,7 @@ async def health() -> HealthResponse:
     """Health check endpoint."""
     return HealthResponse(
         status="ok",
-        version="1.0.0",
+        version=__version__,
         environment=settings.environment.value,
         procedures_loaded=len(registry.procedures),
         auth_enabled=settings.auth_enabled,

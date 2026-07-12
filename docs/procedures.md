@@ -112,7 +112,11 @@ The agent evaluates conditions and branches accordingly.
 |-------|----------|-------------|
 | `conditions` | yes | List of condition objects with `if` and `next_step` |
 
-Conditions are expressed in natural language — the LLM interprets them based on the data it has gathered in previous steps.
+Natural-language conditions are conversational guidance only. They may help the
+model decide what clarification to propose, but they cannot authorize an action.
+Production eligibility and branching for consequential work must be implemented
+as typed deterministic decisions in `workflow_engine/core` and covered by replay
+tests.
 
 ### `inform`
 
@@ -231,3 +235,20 @@ procedure:
 | `customer_service_complaint.yaml` | `cs_complaint` | Customer Service | 6 steps — greet, classify, lookup context, resolve, escalate, close |
 | `cs_eft_dispute.yaml` | `cs_eft_dispute` | Customer Service | 9 steps — collect info, lookup, assess eligibility (Reg E tiers), file dispute, provisional credit, deny late/redirect non-EFT, escalate, close |
 | `fraud_ops_alert_triage.yaml` | `fraud_alert_triage` | Fraud Ops | 9 steps — receive alert, review, gather evidence, check devices, assess risk, flag/clear/escalate, document, close |
+
+## Governed policy boundary
+
+YAML procedure prose remains conversational guidance. Consequential eligibility,
+fact authority, parameter provenance, idempotency, and connector postconditions
+belong in typed core services and signed policy packages—not natural-language
+`evaluate` conditions.
+
+The initial policy lifecycle is `draft -> approved -> active -> retired`. The
+package author and approver must be different identities. Approved and active
+packages are HMAC signed using canonical JSON. Production signing keys must be
+loaded from a secret manager; never place them in YAML, prompts, ADK state, or
+source control.
+
+For compound intents, the deterministic router selects one primary procedure and
+explicit subprocedures, then locks every version for the case. It never silently
+switches an active case to a newer policy version.

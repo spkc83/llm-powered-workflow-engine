@@ -9,12 +9,16 @@ from unittest.mock import MagicMock
 
 from workflow_engine.database.db import init_db
 from workflow_engine.database.seed import seed_all
+from workflow_engine.auth.models import Permission
 
 
 def make_tool_context(initial_state=None):
     """Return a mock object that behaves like ADK ToolContext for testing."""
     ctx = MagicMock()
-    ctx.state = initial_state if initial_state is not None else {}
+    state = dict(initial_state or {})
+    state.setdefault("actor_permissions", [permission.value for permission in Permission])
+    state.setdefault("refund_consent_evidence", "test:explicit-consent")
+    ctx.state = state
     return ctx
 
 
@@ -119,35 +123,35 @@ class TestLookupOrder:
 class TestSearchOrders:
     @pytest.mark.asyncio
     async def test_finds_order_by_merchant_name(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await search_orders("CUST-456", ctx, merchant_name="TechMart")
         assert result["count"] == 1
         assert result["matches"][0]["order_id"] == "ORD-123"
 
     @pytest.mark.asyncio
     async def test_finds_order_by_approximate_amount(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await search_orders("CUST-456", ctx, amount=80)
         assert result["count"] == 1
         assert result["matches"][0]["order_id"] == "ORD-123"
 
     @pytest.mark.asyncio
     async def test_returns_empty_for_wrong_customer(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-789"})
         result = await search_orders("CUST-789", ctx, merchant_name="TechMart")
         assert result["count"] == 0
         assert result["matches"] == []
 
     @pytest.mark.asyncio
     async def test_returns_multiple_matches_when_ambiguous(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await search_orders("CUST-456", ctx)
         assert result["count"] >= 1
         assert isinstance(result["matches"], list)
 
     @pytest.mark.asyncio
     async def test_stores_order_data_when_single_match(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         await search_orders("CUST-456", ctx, merchant_name="TechMart")
         assert "order_data" in ctx.state
         assert ctx.state["order_data"]["order_id"] == "ORD-123"
@@ -155,7 +159,7 @@ class TestSearchOrders:
 
     @pytest.mark.asyncio
     async def test_returns_not_found_for_no_matches(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await search_orders("CUST-456", ctx, merchant_name="NonexistentStore")
         assert result["count"] == 0
         assert "No orders found" in result["message"]
@@ -163,7 +167,7 @@ class TestSearchOrders:
     @pytest.mark.asyncio
     async def test_falls_back_without_date_when_date_misses(self):
         """If the date filter is too narrow, retry without it using merchant_name."""
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-345"})
         # Use a date far from any order — fallback should still find by merchant
         result = await search_orders("CUST-345", ctx, merchant_name="HomeOffice", date="2020-01-01")
         assert result["count"] == 1
@@ -173,26 +177,26 @@ class TestSearchOrders:
 class TestGetCustomerProfile:
     @pytest.mark.asyncio
     async def test_returns_known_customer(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await get_customer_profile("CUST-456", ctx)
         assert result["found"] is True
         assert result["name"] == "Jane Smith"
 
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_customer(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-UNKNOWN"})
         result = await get_customer_profile("CUST-UNKNOWN", ctx)
         assert result["found"] is False
 
     @pytest.mark.asyncio
     async def test_stores_customer_data_in_state(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         await get_customer_profile("CUST-456", ctx)
         assert ctx.state["customer_data"]["customer_id"] == "CUST-456"
 
     @pytest.mark.asyncio
     async def test_loyalty_tier_present(self):
-        ctx = make_tool_context()
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await get_customer_profile("CUST-456", ctx)
         assert "loyalty_tier" in result
 
@@ -200,40 +204,43 @@ class TestGetCustomerProfile:
 class TestIssueRefund:
     @pytest.mark.asyncio
     async def test_returns_refund_id(self):
-        ctx = make_tool_context({"order_data": {"total": 79.99, "payment_method": "credit_card"}})
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         result = await issue_refund("ORD-123", "defective item", ctx)
         assert "refund_id" in result
         assert result["refund_id"].startswith("REF-")
 
     @pytest.mark.asyncio
-    async def test_uses_order_total_from_state(self):
-        ctx = make_tool_context({"order_data": {"total": 155.97, "payment_method": "paypal"}})
-        result = await issue_refund("ORD-456", "wrong item", ctx)
-        assert result["amount"] == 155.97
+    async def test_reloads_order_total_instead_of_trusting_session_state(self):
+        ctx = make_tool_context({
+            "customer_id": "CUST-456",
+            "order_data": {"total": 1.00, "payment_method": "attacker_controlled"},
+        })
+        result = await issue_refund("ORD-123", "wrong item", ctx)
+        assert result["amount"] == 79.99
 
     @pytest.mark.asyncio
     async def test_status_is_processed(self):
-        ctx = make_tool_context({"order_data": {"total": 49.99, "payment_method": "debit"}})
-        result = await issue_refund("ORD-999", "changed mind", ctx)
+        ctx = make_tool_context({"customer_id": "CUST-456"})
+        result = await issue_refund("ORD-123", "changed mind", ctx)
         assert result["status"] == "processed"
 
     @pytest.mark.asyncio
     async def test_stores_refund_data_in_state(self):
-        ctx = make_tool_context({"order_data": {"total": 79.99, "payment_method": "credit_card"}})
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         await issue_refund("ORD-123", "reason", ctx)
         assert "refund_data" in ctx.state
 
     @pytest.mark.asyncio
     async def test_sets_workflow_status_in_state(self):
-        ctx = make_tool_context({"order_data": {"total": 79.99, "payment_method": "credit_card"}})
+        ctx = make_tool_context({"customer_id": "CUST-456"})
         await issue_refund("ORD-123", "reason", ctx)
         assert ctx.state["workflow_status"] == "refund_processed"
 
     @pytest.mark.asyncio
-    async def test_defaults_to_zero_when_no_order_data(self):
+    async def test_denies_when_verified_customer_context_is_missing(self):
         ctx = make_tool_context()
         result = await issue_refund("ORD-123", "reason", ctx)
-        assert result["amount"] == 0
+        assert result["status"] == "not_authorized"
 
 
 class TestUpdateCaseStatus:

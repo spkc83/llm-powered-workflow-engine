@@ -24,6 +24,7 @@ class HttpChannel(Channel):
         """
         return InboundMessage(
             channel=ChannelType.HTTP_REST,
+            channel_message_id=raw_data.get("message_id"),
             user_id=raw_data["user_id"],
             session_id=raw_data.get("session_id"),
             text=raw_data["message"],
@@ -67,6 +68,7 @@ class WebSocketChannel(Channel):
         """
         return InboundMessage(
             channel=ChannelType.WEBSOCKET,
+            channel_message_id=raw_data.get("message_id"),
             user_id=raw_data["user_id"],
             session_id=raw_data.get("session_id"),
             text=raw_data["message"],
