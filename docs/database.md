@@ -69,3 +69,7 @@ must pass the same conformance behavior:
 
 Do not point `DatabaseSessionService` at the domain/core database. ADK schemas and
 retention differ and ADK state is untrusted for authorization.
+
+The packaged SQLite topology is intentionally small: one API worker and one action
+worker on the same host/volume. Multi-node or high-write deployments must provide a
+conforming external adapter; this repository does not include PostgreSQL support.

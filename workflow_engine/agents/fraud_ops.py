@@ -1,4 +1,5 @@
 """Fraud operations agent factory."""
+from typing import Any, Callable
 from google.adk.agents import Agent
 
 from ..config import create_model, get_generate_content_config
@@ -48,7 +49,7 @@ Additional guidelines:
 """
 
 # Map tool name strings (from YAML) to actual Python functions
-TOOL_MAP = {
+TOOL_MAP: dict[str, Callable[..., Any]] = {
     "get_fraud_alert": get_fraud_alert,
     "get_account_transactions": get_account_transactions,
     "check_device_fingerprint": check_device_fingerprint,

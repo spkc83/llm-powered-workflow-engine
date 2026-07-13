@@ -87,7 +87,7 @@ class AuditEntry:
         self.metadata = metadata or {}
 
     def to_dict(self) -> dict[str, Any]:
-        entry = {
+        entry: dict[str, Any] = {
             "entry_id": self.entry_id,
             "timestamp": self.timestamp,
             "action": self.action.value,

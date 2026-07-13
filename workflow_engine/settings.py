@@ -130,6 +130,10 @@ class Settings(BaseSettings):
         default="sqlite+aiosqlite:///data/upstream_sandbox.db",
         description="SQLite-backed deterministic upstream emulator used only outside production",
     )
+    provider_bundle_factory: Optional[str] = Field(
+        default=None,
+        description="Trusted package.module:callable returning a complete ProviderBundle",
+    )
     action_worker_lease_seconds: int = Field(default=30, ge=5, le=3600)
     action_reconciliation_delay_seconds: int = Field(default=30, ge=0, le=86400)
 
@@ -142,11 +146,6 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", description="Log level")
     log_format: str = Field(default="json", description="Log format: json or text")
     log_file: Optional[str] = Field(default=None, description="Log file path (None for stdout)")
-
-    # --- Observability ---
-    metrics_enabled: bool = Field(default=False, description="Enable Prometheus metrics")
-    tracing_enabled: bool = Field(default=False, description="Enable OpenTelemetry tracing")
-    tracing_endpoint: Optional[str] = Field(default=None, description="OTLP endpoint")
 
     # --- Automated Reasoning ---
     reasoning_enabled: bool = Field(default=True, description="Enable Z3/SymPy reasoning verification")
@@ -187,6 +186,8 @@ class Settings(BaseSettings):
             raise ValueError("Policy author and approver must be different")
         if self.is_production and self.upstream_mode is UpstreamMode.SANDBOX:
             raise ValueError("UPSTREAM_MODE=sandbox is forbidden in production")
+        if self.upstream_mode is UpstreamMode.PROVIDER and not self.provider_bundle_factory:
+            raise ValueError("PROVIDER_BUNDLE_FACTORY is required for UPSTREAM_MODE=provider")
         if self.is_production and "*" in self.cors_origins:
             raise ValueError("Wildcard CORS origins are forbidden in production")
         if self.auth_algorithm not in {"HS256", "HS384", "HS512"}:

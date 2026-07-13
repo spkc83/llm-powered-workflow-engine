@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.1.0] - 2026-07-12
+
+### Added
+- Trusted complete provider-bundle loading for operational `provider` mode.
+- Separate continuously supervised action/reconciliation worker process.
+- Backend readiness endpoint and Shiny system-status view.
+- UI client, documentation parity, provider-bundle, and readiness tests.
+- Current-state, configuration, UI, and testing guides plus expanded architecture.
+
+### Changed
+- Shiny console now honors `BACKEND_URL`/`BACKEND_AUTH_TOKEN` and canonical v3 APIs.
+- Production reference Compose uses the documented single-API-worker SQLite topology.
+- README rewritten around real architecture, assumptions, supported features, and limits.
+- Removed inactive Prometheus/OpenTelemetry configuration flags.
+
 ## Documentation and licensing
 
 - Added an explicit MIT license and contributor attribution policy.

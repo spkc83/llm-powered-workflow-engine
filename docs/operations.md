@@ -9,7 +9,8 @@
 5. Verify upstream mode: sandbox only in development, disabled until real adapters
    pass conformance.
 6. Verify NAM profile and enforcement setting.
-7. Start the API; `/health` must report version `3.0.0`, adapter mode, and profile.
+7. Start the API; `/health` reports process/version and `/ready` verifies stores,
+   active policy, and provider-bundle state.
 8. Verify `/api/v1/operations/audit-integrity`.
 
 ## Required production configuration
@@ -40,14 +41,19 @@ Repeated `unknown` queries also wait for that delay to avoid hammering a provide
 Never redispatch to discover success. Alert when unknown age exceeds the
 procedure-owned deadline.
 
+Run the continuous process as
+`python -m workflow_engine.worker --poll-seconds 2`. Docker Compose defines a
+separate worker service. Stop it before migrations, provider cutover, or rollback;
+expired leases are recovered after restart.
+
 ## Operational endpoints
 
-- `/operations/actions` — status and outcomes;
-- `/operations/outbox` — pending/leased/failed/quarantined/delivered work;
-- `/operations/conversation-quarantine` — provider ordering gaps;
-- `/operations/delivery-receipts` — channel delivery callbacks;
-- `/operations/audit-integrity` — local hash-chain check;
-- `/metrics` — action/outbox counts, policies, adapter/profile state.
+- `/api/v1/operations/actions` — status and outcomes;
+- `/api/v1/operations/outbox` — pending/leased/failed/quarantined/delivered work;
+- `/api/v1/operations/conversation-quarantine` — provider ordering gaps;
+- `/api/v1/operations/delivery-receipts` — channel delivery callbacks;
+- `/api/v1/operations/audit-integrity` — local hash-chain check;
+- `/api/v1/metrics` — action/outbox counts, policies, adapter/profile state.
 
 Restrict these routes with administrative RBAC and network policy.
 

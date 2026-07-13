@@ -13,7 +13,7 @@ Reg E Key Rules:
 
 import json
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional, cast
 
 from google.adk.tools import ToolContext
 
@@ -81,7 +81,7 @@ async def lookup_dispute(dispute_id: str, tool_context: ToolContext) -> dict:
     tool_context.state["customer_id"] = dispute["customer_id"]
 
     # Add Reg E context
-    tier_info = _LIABILITY_TIERS.get(dispute["liability_tier"], {})
+    tier_info = cast(dict[str, Any], _LIABILITY_TIERS.get(dispute["liability_tier"], {}))
     result["liability_description"] = tier_info.get("label", "unknown")
     result["reg_e_covered"] = True
 

@@ -107,6 +107,7 @@ from workflow_engine.integrations.sandbox import (
     StubSpeechToTextAdapter,
     StubTextToSpeechAdapter,
 )
+from workflow_engine.integrations.loading import ProviderBundle, validate_provider_bundle
 from workflow_engine.settings import UpstreamMode
 
 # --- Initialize logging ---
@@ -159,8 +160,13 @@ async def lifespan(app: FastAPI):
     await core_store.initialize()
     await policy_repository.initialize()
     await sandbox_action_connector.initialize()
-    await handoff_provider.initialize()
-    await delivery_receipts.initialize()
+    if provider_bundle is not None:
+        await provider_bundle.initialize()
+    else:
+        initialize_handoff = getattr(handoff_provider, "initialize", None)
+        if initialize_handoff is not None:
+            await initialize_handoff()
+        await delivery_receipts.initialize()
     for package in bootstrap_policies:
         if await policy_repository.get(package.package_id) is None:
             await policy_repository.save(package)
@@ -329,16 +335,36 @@ policy_service = PolicyService(policy_repository, policy_signer, policy_registry
 
 sandbox_action_connector = SQLiteSandboxActionConnector(settings.sandbox_sqlite_path)
 default_action_connector: ActionConnector
-if settings.effective_upstream_mode is UpstreamMode.SANDBOX:
+provider_bundle: ProviderBundle | None = None
+if settings.effective_upstream_mode is UpstreamMode.PROVIDER:
+    provider_factory = load_factory(settings.provider_bundle_factory or "")
+    provider_bundle = validate_provider_bundle(provider_factory(settings))
+    stt_provider = provider_bundle.stt
+    tts_provider = provider_bundle.tts
+    telephony_provider = provider_bundle.telephony
+    chat_provider = provider_bundle.chat
+    handoff_provider = provider_bundle.handoff
+    default_action_connector = provider_bundle.action
+    authoritative_resources = provider_bundle.resources
+    delivery_receipts = SQLiteDeliveryReceiptStore(settings.sandbox_sqlite_path)
+elif settings.effective_upstream_mode is UpstreamMode.SANDBOX:
     default_action_connector = sandbox_action_connector
+    handoff_provider = SQLiteHandoffQueueAdapter(settings.sandbox_sqlite_path)
+    delivery_receipts = SQLiteDeliveryReceiptStore(settings.sandbox_sqlite_path)
+    chat_provider = LocalChatAdapter(delivery_receipts)
+    stt_provider = StubSpeechToTextAdapter()
+    tts_provider = StubTextToSpeechAdapter()
+    telephony_provider = LocalTelephonyAdapter()
+    authoritative_resources = sandbox_action_connector
 else:
     default_action_connector = DisabledActionConnector()
-handoff_provider = SQLiteHandoffQueueAdapter(settings.sandbox_sqlite_path)
-delivery_receipts = SQLiteDeliveryReceiptStore(settings.sandbox_sqlite_path)
-chat_provider = LocalChatAdapter(delivery_receipts)
-stt_provider = StubSpeechToTextAdapter()
-tts_provider = StubTextToSpeechAdapter()
-telephony_provider = LocalTelephonyAdapter()
+    handoff_provider = SQLiteHandoffQueueAdapter(settings.sandbox_sqlite_path)
+    delivery_receipts = SQLiteDeliveryReceiptStore(settings.sandbox_sqlite_path)
+    chat_provider = LocalChatAdapter(delivery_receipts)
+    stt_provider = StubSpeechToTextAdapter()
+    tts_provider = StubTextToSpeechAdapter()
+    telephony_provider = LocalTelephonyAdapter()
+    authoritative_resources = sandbox_action_connector
 jurisdiction_profile = load_jurisdiction_profile(
     settings.jurisdiction_profile, settings.jurisdiction_config_path
 )
@@ -355,7 +381,7 @@ core_gateway = ActionGateway(
         "issue_refund": (
             DatabaseRefundConnector()
             if settings.effective_upstream_mode is UpstreamMode.SANDBOX
-            else DisabledActionConnector()
+            else default_action_connector
         ),
         **consequential_connectors,
     },
@@ -364,7 +390,7 @@ core_gateway = ActionGateway(
 )
 core_engine = CoreEngine(core_kernel, core_gateway, RefundDecisionService())
 consequential_action_service = ConsequentialActionService(
-    core_kernel, core_gateway, sandbox_action_connector
+    core_kernel, core_gateway, authoritative_resources
 )
 action_worker = ActionDeliveryWorker(
     core_store,
@@ -822,7 +848,7 @@ def _require_permission(actor: UserContext, permission: Permission) -> None:
 
 
 def _require_upstream_available() -> None:
-    if settings.effective_upstream_mode is not UpstreamMode.SANDBOX:
+    if settings.effective_upstream_mode is UpstreamMode.DISABLED:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -1104,6 +1130,7 @@ async def update_handoff_from_provider(
     actor: UserContext = Depends(get_current_user),
 ) -> dict:
     _require_permission(actor, Permission.PROVIDER_CALLBACK)
+    _require_upstream_available()
     record = await conversation_runtime.transition_handoff(
         handoff_id, request.status, request.assigned_agent_id
     )
@@ -1605,4 +1632,21 @@ async def health() -> HealthResponse:
         upstream_mode=settings.effective_upstream_mode.value,
         jurisdiction_profile=jurisdiction_profile.profile_id,
     )
+
+
+@app.get("/ready", tags=["system"])
+async def readiness() -> dict:
+    """Readiness check for stores, active policy, and configured upstream mode."""
+    try:
+        await core_store.initialize()
+        await policy_repository.initialize()
+        active = await policy_repository.list(PolicyLifecycle.ACTIVE)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"ready": False, "reason": type(exc).__name__}) from exc
+    return {
+        "ready": bool(active),
+        "active_policy_packages": len(active),
+        "upstream_mode": settings.effective_upstream_mode.value,
+        "provider_bundle_loaded": provider_bundle is not None,
+    }
     SQLiteDeliveryReceiptStore,

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   # --- Backend API ---
   backend:
@@ -26,7 +24,7 @@ services:
       - ./data:/app/data
       - ./procedures:/app/procedures
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/ready"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -45,6 +43,28 @@ services:
       - .env
     environment:
       - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "workflow_engine.worker", "--poll-seconds", "2"]
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=dev
+      - DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - REFERENCE_DATA_DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - POLICY_DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
+      - UPSTREAM_MODE=sandbox
+      - SANDBOX_DATABASE_URL=sqlite+aiosqlite:///data/upstream_sandbox.db
+    volumes:
+      - ./data:/app/data
+      - ./procedures:/app/procedures
     depends_on:
       backend:
         condition: service_healthy

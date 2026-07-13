@@ -18,6 +18,16 @@ engine is vendor-neutral. Built-in adapters emulate these contracts only in
 `UPSTREAM_MODE=sandbox` is rejected when `ENVIRONMENT=production`. Never route
 production traffic to the sandbox database.
 
+### Provider bundle loading
+
+Set `UPSTREAM_MODE=provider` and
+`PROVIDER_BUNDLE_FACTORY=package.module:create_bundle`. The trusted callable receives
+validated settings and returns a `ProviderBundle` containing STT, TTS, telephony,
+chat, handoff, action, and authoritative-resource adapters. Startup rejects provider
+mode without the factory or when the return type is invalid. Provider code must be
+installed in the deployment image; factory paths are privileged code-execution
+configuration and must never come from requests or tenant data.
+
 Interactive API documentation is available at `/docs`; ReDoc is at `/redoc`.
 `GET /api/v1/integrations/contracts` publishes JSON Schema for HTTP bodies and
 WebSocket frames because OpenAPI itself does not describe WebSocket messages.
