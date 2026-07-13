@@ -8,6 +8,27 @@ For complete payload schemas and live examples, use Swagger. WebSocket frame JSO
 Schemas are available from `GET /api/v1/integrations/contracts` because WebSocket
 frames are outside OpenAPI.
 
+## Authentication, identity, and errors
+
+When authentication is enabled, send `Authorization: Bearer <JWT>`. The token binds
+the actor identity and role; `customer_id` is the serviced customer and cannot be
+used to impersonate another customer. Integration tokens require channel-ingest,
+delivery, or callback permissions. Actions also require their specific permission;
+policy and operations routes require administrative read/write permissions.
+
+| Status | Meaning |
+|---|---|
+| 400/422 | Invalid payload or unsupported typed action. |
+| 401 | Missing, expired, or invalid bearer token. |
+| 403 | Actor lacks permission or customer delegation. |
+| 404 | Requested case/action/handoff/policy/resource does not exist. |
+| 409 | Version, lifecycle, idempotency, sequence, or jurisdiction conflict. |
+| 429 | Rate limit exceeded. |
+| 503 | Required upstream capability is disabled or unavailable. |
+
+Reuse an idempotency key only for the same action, customer, and parameters. A key
+reused for a different command is rejected as a conflict.
+
 ## Conversation APIs
 
 | Method | Path | Purpose |
@@ -89,6 +110,7 @@ Production explicitly rejects `UPSTREAM_MODE=sandbox`.
 - `/api/v1/operations/audit-integrity`
 - `/api/v1/metrics`
 - `/health`
+- `/ready` (database/policy/provider readiness)
 - `/api/v1/procedures` and `/procedures/active`
 - `/api/v1/session/{session_id}/state` and `/procedure`
 - `/api/v1/customers`, `/sessions`, and allow-listed `/tables/{table_name}`

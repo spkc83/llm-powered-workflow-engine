@@ -67,7 +67,7 @@ class WorkflowEngineError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> dict[str, Any]:
-        result = {
+        result: dict[str, Any] = {
             "error": {
                 "code": self.code.value,
                 "message": self.message,

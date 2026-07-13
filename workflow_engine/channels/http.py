@@ -40,7 +40,7 @@ class HttpChannel(Channel):
 
     async def format_response(self, message: OutboundMessage) -> dict:
         """Format the outbound message as an HTTP JSON response body."""
-        response = {
+        response: dict[str, Any] = {
             "response": message.text,
             "session_id": message.session_id,
         }

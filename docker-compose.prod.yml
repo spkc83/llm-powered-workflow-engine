@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Production overlay — use with:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
@@ -24,7 +22,7 @@ services:
       # PolicyRepository adapters before using these URLs:
       # - DATABASE_URL=postgresql+asyncpg://user:pass@db:5432/workflow
       # - POLICY_DATABASE_URL=postgresql+asyncpg://user:pass@db:5432/workflow
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     deploy:
       resources:
         limits:
@@ -33,3 +31,11 @@ services:
         reservations:
           cpus: "0.5"
           memory: 512M
+  worker:
+    environment:
+      - ENVIRONMENT=production
+      - AUTH_ENABLED=true
+      - RATE_LIMIT_ENABLED=true
+      - UPSTREAM_MODE=disabled
+      - JURISDICTION_ENFORCE=true
+      - SEED_REFERENCE_DATA=false
