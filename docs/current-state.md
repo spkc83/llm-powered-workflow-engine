@@ -47,6 +47,17 @@ from local simulation and deployment-supplied integrations.
 | Swagger | Implemented | OpenAPI, Swagger, ReDoc, HTTP examples, separate WebSocket schemas. | Does not substitute for provider certification. |
 | Docker Compose | Implemented reference | Backend, Shiny UI, and worker; single-worker SQLite production fallback. | Real secrets, TLS, provider bundle, monitoring, backups, and approved storage remain external. |
 
+## Important development/production difference
+
+In production, model-visible consequential tools are removed from the ADK agents.
+The conversation path can gather information and explain that an authorized action
+workflow is required, but it cannot submit the action gateway automatically.
+
+In development, legacy model write tools remain available for historical demo
+scenarios and may update the local reference SQLite database. They bypass the v3
+typed action service and are not evidence of production action execution. New
+integration work should exercise `/api/v1/core/actions` or `/api/v1/core/refunds`.
+
 ## Supported demonstrations
 
 - customer-service refund and complaint conversations;

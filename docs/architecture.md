@@ -100,12 +100,13 @@ flowchart TB
     ProviderClient --> Middleware
     Middleware --> Routes
     Routes --> Conversation
+    Conversation --> Runtime
     Conversation --> ADK
     ADK --> Procedure
-    Conversation --> Core
-    Core --> Actions
+    Routes --> Actions
+    Actions --> Core
     Actions --> Policy
-    Actions --> CoreDb
+    Core --> CoreDb
     Runtime --> CoreDb
     Policy --> PolicyDb
     ADK --> SessionDb
@@ -115,6 +116,11 @@ flowchart TB
     Delivery --> SandboxDb
     Reconcile --> SandboxDb
 ```
+
+The line from `ConversationService` to the core database represents only durable
+inbox/deduplication/order state. It does **not** mean a chat turn automatically
+executes an action. Typed actions enter through separate action endpoints and then
+flow through `ConsequentialActionService` and `ActionGateway`.
 
 The Docker configuration starts the API, Shiny UI, and a separate worker service.
 The worker continuously runs action delivery and reconciliation and handles
@@ -153,11 +159,21 @@ service. It:
 duplicate is suppressed. A sequence gap is quarantined until the provider resends
 the missing message.
 
+The service does not create cases, verify business facts, authorize actions, or
+dispatch providers. Its output is a guarded conversational response plus response
+metadata.
+
 ### ADK and agent layer
 
 The router agent selects customer-service, fraud-operations, or general handling.
 Specialist agents use procedure instructions and read/proposal tools. In production,
 the tool catalog removes consequential model tools from the executable tool set.
+
+In development, the catalog currently exposes legacy local write tools so the old
+demonstration scenarios can mutate the reference SQLite database. Those calls do
+not use the v3 typed action gateway and must not be interpreted as the production
+architecture. Production removes them and instructs the model not to claim that a
+frozen action executed.
 
 The ADK session database is deliberately separate from the core database. Model
 state, prompts, and session history are not trusted evidence for authorization.
@@ -274,6 +290,29 @@ sequenceDiagram
         Conversation-->>Client: TurnResult
     end
 ```
+
+This sequence ends with a conversational response. It does not enter the action
+gateway. If the conversation determines that a consequential action is appropriate,
+a trusted client/application integration must make a separate typed action request.
+That integration bridge is not automated by `ConversationService` in v3.1.0.
+
+### Why conversation and action are separate
+
+The separation prevents a model utterance such as “I will refund that now” from
+becoming a financial effect. Conversation is allowed to be probabilistic; action
+authorization must be deterministic and evidence-backed.
+
+There are therefore two application entry paths:
+
+1. **Conversation path** — `/chat`, `/conversations/turns`, or WebSocket → inbox
+   acceptance → ADK/procedure → guardrails/reasoning → response.
+2. **Action path** — `/core/actions` or `/core/refunds` → authoritative resource
+   reload → case/facts → RBAC/policy/evidence → action/outbox → worker/provider.
+
+The intended product integration may use the result of a conversation to populate
+an action form or command, but it must not trust model-generated parameters. It must
+submit typed identifiers, consent/approval evidence, and an idempotency key; the
+action service reloads authoritative values before authorization.
 
 The compatibility `/api/v1/chat` endpoint delegates to the same processing path.
 The WebSocket endpoint uses the same conversation service but returns WebSocket

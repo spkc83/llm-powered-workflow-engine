@@ -32,27 +32,38 @@ account restriction, dispute, SAR, case change, or human transfer.
 ```mermaid
 flowchart LR
     Client[Chat / WebSocket / IVR client]
+    Trusted[Trusted action client / application integration]
     API[FastAPI + Auth/RBAC]
     Conversation[Shared ConversationService]
+    Inbox[(Durable inbox/order state)]
     ADK[Bounded ADK/Gemini layer]
     Procedure[YAML procedure executor]
-    Core[Case, fact, policy and action core]
+    Action[Typed ActionService + Gateway]
+    Core[(Cases, facts, policy, actions)]
     Outbox[(Transactional outbox)]
-    Worker[Delivery and reconciliation workers]
+    Worker[Delivery and reconciliation worker]
     Provider[Provider adapter]
 
     Client --> API
     API --> Conversation
+    Conversation --> Inbox
     Conversation --> ADK
     ADK --> Procedure
-    Conversation --> Core
-    Core --> Outbox
+    Trusted --> API
+    API --> Action
+    Action --> Core
+    Action --> Outbox
     Outbox --> Worker
     Worker --> Provider
 ```
 
 The full architecture, trust boundaries, transaction boundaries, state machines,
 and request sequences are explained in [Application Architecture](docs/architecture.md).
+
+Chat and actions are deliberately separate entry paths. A chat turn can collect
+information and ask for consent, but `ConversationService` does not automatically
+submit a consequential action. A trusted client or application integration must
+construct the typed action request with policy, evidence, and idempotency context.
 
 ## What works today
 
