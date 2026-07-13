@@ -388,6 +388,8 @@ async def search_orders(
     if len(matches) == 1:
         match = matches[0]
         order = await OrderRepository.get_by_id(match["order_id"])
+        if order is None:
+            return {"matches": [], "count": 0, "message": "The selected order no longer exists."}
 
         # Defense-in-depth: verify the order belongs to the requesting customer
         if order["customer_id"] != customer_id:

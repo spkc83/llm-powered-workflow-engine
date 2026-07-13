@@ -1,6 +1,6 @@
 # Documentation
 
-This documentation describes v3.0.0. Provider implementations, deployment
+This documentation describes v3.1.0. Provider implementations, deployment
 credentials, and jurisdiction approvals remain deployment-specific; the
 repository ships only provider-neutral contracts and truthful local adapters.
 
@@ -11,6 +11,10 @@ repository ships only provider-neutral contracts and truthful local adapters.
 - [Chat and IVR channels](channels.md)
 - [API reference and Swagger](api.md)
 - [Upstream integration guide](integration-guide.md)
+- [Current feature status and limitations](current-state.md)
+- [Configuration reference](configuration.md)
+- [Shiny development/operator console](ui.md)
+- [Testing and verification](testing.md)
 
 ## Build and extend
 
@@ -32,5 +36,5 @@ repository ships only provider-neutral contracts and truthful local adapters.
 
 ## Release
 
-- [v3.0 release notes](../RELEASE_NOTES.md)
+- [v3.1 release notes](../RELEASE_NOTES.md)
 - [Changelog](../CHANGELOG.md)

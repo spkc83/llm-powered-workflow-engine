@@ -1,7 +1,7 @@
 """JWT token creation and verification."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import jwt
 
@@ -32,7 +32,7 @@ def create_access_token(
     now = datetime.now(timezone.utc)
     expire = now + (expires_delta or timedelta(minutes=settings.auth_token_expire_minutes))
 
-    payload = {
+    payload: dict[str, Any] = {
         "sub": user_id,
         "role": role.value,
         "iat": now,

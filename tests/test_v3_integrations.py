@@ -29,6 +29,7 @@ from workflow_engine.integrations.sandbox import (
     StubTextToSpeechAdapter,
 )
 from workflow_engine.integrations.contracts import HandoffRequest
+from workflow_engine.integrations.loading import ProviderBundle, validate_provider_bundle
 from workflow_engine.settings import Environment, Settings, UpstreamMode
 from workflow_engine.conversation.runtime import ChannelKind, ConversationRuntime, MessageEnvelope
 from workflow_engine.conversation.service import ConversationService, GeneratedTurn
@@ -573,3 +574,22 @@ def test_deployment_adapter_factory_uses_explicit_dotted_callable_contract():
     assert factory is not None
     with pytest.raises(ValueError, match="package.module:callable"):
         load_factory("not-a-dotted-factory")
+
+
+@pytest.mark.asyncio
+async def test_provider_bundle_initializes_each_unique_adapter_once():
+    class Adapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def initialize(self):
+            self.calls += 1
+
+    adapter = Adapter()
+    bundle = ProviderBundle(
+        stt=adapter, tts=adapter, telephony=adapter, chat=adapter,
+        handoff=adapter, action=adapter, resources=adapter,
+    )
+    assert validate_provider_bundle(bundle) is bundle
+    await bundle.initialize()
+    assert adapter.calls == 1

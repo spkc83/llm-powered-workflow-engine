@@ -1,10 +1,13 @@
 """Shiny for Python chat UI for the LLM Workflow Engine."""
 
-import pandas as pd
 import httpx
+import pandas as pd
 from shiny import App, reactive, render, ui
 
-API_BASE = "http://localhost:8000"
+from workflow_engine.ui import WorkflowApiClient
+
+api = WorkflowApiClient()
+API_BASE = api.base_url
 
 # --- Test scenario definitions ---
 
@@ -214,6 +217,11 @@ app_ui = ui.page_sidebar(
             ),
             ui.output_data_frame("table_data"),
         ),
+        ui.nav_panel(
+            "System Status",
+            ui.input_action_button("refresh_status", "Refresh", class_="btn-primary mb-3"),
+            ui.output_ui("system_status"),
+        ),
     ),
     title="LLM Workflow Engine",
     fillable=True,
@@ -234,19 +242,16 @@ def server(input, output, session):
     @render.ui
     async def customer_selector():
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{API_BASE}/api/customers")
-                resp.raise_for_status()
-                data = resp.json()
-                choices = {c["customer_id"]: f"{c['name']} ({c['customer_id']})" for c in data["customers"]}
-                choices["guest"] = "Guest (no account)"
-                return ui.input_select(
-                    "customer_select",
-                    "Select customer:",
-                    choices=choices,
-                    selected=selected_customer(),
-                )
-        except Exception:
+            data = await api.customers()
+            choices = {c["customer_id"]: f"{c['name']} ({c['customer_id']})" for c in data["customers"]}
+            choices["guest"] = "Guest (no account)"
+            return ui.input_select(
+                "customer_select",
+                "Select customer:",
+                choices=choices,
+                selected=selected_customer(),
+            )
+        except httpx.HTTPError:
             return ui.p("Could not load customers", class_="text-muted")
 
     # --- Chat ---
@@ -263,24 +268,18 @@ def server(input, output, session):
             return
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                payload = {
-                    "message": user_msg,
-                    "user_id": _get_user_id(),
-                }
-                sid = session_id()
-                if sid is not None:
-                    payload["session_id"] = sid
+            payload = {
+                "message": user_msg,
+                "user_id": _get_user_id(),
+            }
+            sid = session_id()
+            if sid is not None:
+                payload["session_id"] = sid
 
-                resp = await client.post(f"{API_BASE}/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-                session_id.set(data["session_id"])
-                await chat.append_message({"role": "assistant", "content": data["response"]})
-
-                # Fetch workflow state after each response
-                await _refresh_workflow_state()
+            data = await api.chat(payload)
+            session_id.set(data["session_id"])
+            await chat.append_message({"role": "assistant", "content": data["response"]})
+            await _refresh_workflow_state()
         except httpx.HTTPStatusError as e:
             await chat.append_message({"role": "assistant", "content": f"Error: {e.response.status_code} — {e.response.text}"})
         except httpx.ConnectError:
@@ -292,15 +291,9 @@ def server(input, output, session):
             workflow_state.set({})
             return
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{API_BASE}/api/session/{sid}/state",
-                    params={"user_id": _get_user_id()},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                workflow_state.set(data.get("state", {}))
-        except Exception:
+            data = await api.session_state(sid, _get_user_id())
+            workflow_state.set(data.get("state", {}))
+        except httpx.HTTPError:
             workflow_state.set({})
 
     # --- Workflow state display ---
@@ -336,16 +329,10 @@ def server(input, output, session):
     async def _load_session_history():
         """Fetch session list from backend for the current user."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{API_BASE}/api/sessions",
-                    params={"user_id": _get_user_id()},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                session_list.set(data.get("sessions", []))
-        except Exception:
-            pass
+            data = await api.sessions(_get_user_id())
+            session_list.set(data.get("sessions", []))
+        except httpx.HTTPError:
+            session_list.set([])
 
     @reactive.effect
     @reactive.event(input.new_session)
@@ -418,17 +405,14 @@ def server(input, output, session):
         await chat.append_message({"role": "user", "content": scenario["message"]})
         # Trigger the API call
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                payload = {
-                    "message": scenario["message"],
-                    "user_id": cid,
-                }
-                resp = await client.post(f"{API_BASE}/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                session_id.set(data["session_id"])
-                await chat.append_message({"role": "assistant", "content": data["response"]})
-                await _refresh_workflow_state()
+            payload = {
+                "message": scenario["message"],
+                "user_id": cid,
+            }
+            data = await api.chat(payload)
+            session_id.set(data["session_id"])
+            await chat.append_message({"role": "assistant", "content": data["response"]})
+            await _refresh_workflow_state()
         except httpx.HTTPStatusError as e:
             await chat.append_message({"role": "assistant", "content": f"Error: {e.response.status_code} — {e.response.text}"})
         except httpx.ConnectError:
@@ -452,23 +436,20 @@ def server(input, output, session):
     @render.ui
     async def procedure_list():
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{API_BASE}/api/procedures")
-                resp.raise_for_status()
-                data = resp.json()
-                items = []
-                for proc in data["procedures"]:
-                    desc = proc["description"]
-                    items.append(
-                        ui.tags.div(
-                            ui.tags.strong(proc["name"]),
-                            ui.tags.br(),
-                            ui.tags.small(desc[:80] + "..." if len(desc) > 80 else desc),
-                            class_="mb-2",
-                        )
+            data = await api.procedures()
+            items = []
+            for proc in data["procedures"]:
+                desc = proc["description"]
+                items.append(
+                    ui.tags.div(
+                        ui.tags.strong(proc["name"]),
+                        ui.tags.br(),
+                        ui.tags.small(desc[:80] + "..." if len(desc) > 80 else desc),
+                        class_="mb-2",
                     )
-                return ui.tags.div(*items) if items else ui.p("No procedures loaded")
-        except Exception:
+                )
+            return ui.tags.div(*items) if items else ui.p("No procedures loaded")
+        except httpx.HTTPError:
             return ui.p("Could not load procedures", class_="text-muted")
 
     # --- Data browser ---
@@ -478,12 +459,9 @@ def server(input, output, session):
     async def _load_table():
         table_name = input.table_select()
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{API_BASE}/api/tables/{table_name}")
-                resp.raise_for_status()
-                data = resp.json()
-                table_rows.set(data["rows"])
-        except Exception:
+            data = await api.table(table_name)
+            table_rows.set(data["rows"])
+        except httpx.HTTPError:
             table_rows.set([])
 
     @render.data_frame
@@ -492,6 +470,23 @@ def server(input, output, session):
         if not rows:
             return pd.DataFrame({"message": ["No data. Click Load to fetch a table."]})
         return pd.DataFrame(rows)
+
+    @render.ui
+    @reactive.event(input.refresh_status)
+    async def system_status():
+        try:
+            health = await api.health()
+            metrics = await api.metrics()
+            audit = await api.audit_integrity()
+            return ui.tags.div(
+                ui.tags.h5("Runtime"), ui.tags.pre(str(health)),
+                ui.tags.h5("Core metrics"), ui.tags.pre(str(metrics)),
+                ui.tags.h5("Audit integrity"), ui.tags.pre(str(audit)),
+            )
+        except httpx.HTTPStatusError as exc:
+            return ui.p(f"Status request failed: {exc.response.status_code}", class_="text-danger")
+        except httpx.ConnectError:
+            return ui.p(f"Cannot connect to {API_BASE}", class_="text-danger")
 
 
 app = App(app_ui, server)

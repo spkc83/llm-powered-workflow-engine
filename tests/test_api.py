@@ -60,6 +60,14 @@ class TestHealthEndpoint:
         assert isinstance(data["procedures_loaded"], int)
         assert data["procedures_loaded"] >= 3
 
+    @pytest.mark.asyncio
+    async def test_readiness_reports_active_policy(self, client):
+        resp = await client.get("/ready")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ready"] is True
+        assert data["active_policy_packages"] >= 1
+
 
 # ---------------------------------------------------------------------------
 # /api/procedures
