@@ -1,17 +1,18 @@
 # Documentation
 
-This documentation describes v3.1.0. Provider implementations, deployment
-credentials, and jurisdiction approvals remain deployment-specific; the
-repository ships only provider-neutral contracts and truthful local adapters.
+This documentation describes v3.1.0. Start with the architecture and current-state
+pages; they explain how the application works and clearly separate implemented
+engine behavior, local simulation, and deployment-supplied integrations.
 
 ## Start here
 
 - [Product and architecture overview](../README.md)
+- [Application architecture and end-to-end flows](architecture.md)
+- [Current feature status and limitations](current-state.md)
 - [User and service-operator guide](user-guide.md)
 - [Chat and IVR channels](channels.md)
 - [API reference and Swagger](api.md)
 - [Upstream integration guide](integration-guide.md)
-- [Current feature status and limitations](current-state.md)
 - [Configuration reference](configuration.md)
 - [Shiny development/operator console](ui.md)
 - [Testing and verification](testing.md)

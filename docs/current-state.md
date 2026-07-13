@@ -1,41 +1,82 @@
 # Current Application State
 
-Last verified: v3.1.0 code line, 2026-07-12.
+Last verified: version 3.1.0, 2026-07-12.
 
-This page is the authoritative feature-status statement. “Implemented” means the
-repository contains working code and automated coverage. “Sandbox” means a local,
-explicitly simulated implementation. “Deployment-supplied” means the contract and
-loader exist but no vendor implementation or credentials ship here.
+This is the authoritative feature-status statement. It distinguishes working code
+from local simulation and deployment-supplied integrations.
 
-| Area | Status | What is available |
-|---|---|---|
-| Core cases, facts, actions | Implemented | SQLite durable store, typed authority, optimistic concurrency, idempotency. |
-| Policy governance | Implemented | Draft, separate approval, signing, activation, retirement, key rotation. |
-| Chat REST/WebSocket | Implemented | Shared turn service, identity binding, dedupe/order, guardrails. |
-| IVR turn processing | Implemented | Normalized final transcripts, confidence/readback and jurisdiction controls. |
-| STT/TTS/telephony | Sandbox + deployment-supplied | Local stubs are simulated; provider bundle supplies real implementations. |
-| Chat delivery | Sandbox + deployment-supplied | Local receipt ledger; real delivery comes from a provider bundle. |
-| Consequential actions | Implemented core, sandbox/provider effect | Typed authorization/outbox/reconciliation; local effect emulator or provider bundle. |
-| Human handoff | Sandbox + deployment-supplied | Durable lifecycle and local queue; real contact-center connector is external. |
-| Database portability | Interface + deployment-supplied | SQLite ships; other stores must implement and pass the same behavior. |
-| Worker processing | Implemented | Separate `python -m workflow_engine.worker` process plus admin run-once endpoints. |
-| UI | Development/operator console | Shiny UI uses v3 APIs; it is not a production customer portal. |
-| Observability | Partial | Structured logs, health, operational JSON metrics and audit verification; no packaged Prometheus/OTel exporter yet. |
-| Production deployment | Reference boundary | Fail-closed defaults. Real secrets, TLS, providers, durable external monitoring and approved storage remain deployment obligations. |
+## Status definitions
 
-## Important assumptions
+- **Implemented** — wired into the application and covered by automated tests.
+- **Partial** — usable behavior exists, but production or UX work remains.
+- **Sandbox** — explicit local simulation, never a real upstream effect.
+- **Deployment-supplied** — contract and loader exist; the operator supplies code,
+  credentials, and operational ownership.
+- **Out of scope** — intentionally not part of this repository.
 
-- Models and ADK output are untrusted proposals, never authorization.
-- SQLite is the default and reference adapter. The supported production SQLite
-  topology is one API worker plus one action worker on a shared local volume.
-- NAM controls are an engineering profile, not legal advice or regulatory approval.
-- The sandbox contains no real audio, telephony, chat delivery, contact-center, or
-  external business-system integration.
-- `UPSTREAM_MODE=provider` requires `PROVIDER_BUNDLE_FACTORY`; startup fails without it.
+## Capability matrix
 
-## Explicitly out of scope
+| Capability | Status | What works today | Boundary or limitation |
+|---|---|---|---|
+| Core cases and facts | Implemented | SQLite persistence, asserted/verified authority, evidence, expiry, supersession, optimistic concurrency. | Only SQLite implementation ships. |
+| Typed actions | Implemented | Closed schemas, RBAC, customer binding, authoritative reload, policy, consent/approval, idempotency. | External effect depends on sandbox or deployment provider. |
+| Action delivery | Implemented | Atomic action/outbox transaction, leases, retries, quarantine, stable provider key. | Provider correctness must be certified separately. |
+| Reconciliation | Implemented | Ambiguous and stale dispatch becomes unknown; provider is queried without redispatch. | Provider must support truthful query semantics. |
+| Worker process | Implemented | `python -m workflow_engine.worker`; separate Compose service; graceful signal handling. | No packaged scheduler/orchestrator beyond the process loop. |
+| Policy governance | Implemented | Draft, separate approval, HMAC signing, activation, retirement, durable history, key rotation. | No graphical authoring UI or external KMS client. |
+| Chat REST | Implemented | Canonical shared turn pipeline, actor/customer binding, dedupe/order, ADK, guardrails. | Live response quality depends on Gemini configuration. |
+| Chat WebSocket | Implemented | Same safety pipeline and typed frames. | Safety evaluation buffers the response; it is not raw token streaming. |
+| IVR turn processing | Implemented | Final transcript, confidence, readback, consent, DTMF, dedupe, jurisdiction, shared turn service. | Audio capture and call control are provider responsibilities. |
+| STT | Sandbox + deployment-supplied | Stub accepts transcript hint and marks output simulated; provider bundle can supply real STT. | No vendor STT ships. |
+| TTS | Sandbox + deployment-supplied | Stub returns deterministic `sandbox://` reference; provider bundle can supply real TTS. | No audio is generated by the stub. |
+| Telephony | Sandbox + deployment-supplied | Normalized lifecycle receipt; provider bundle can supply call integration. | Stub does not answer, transfer, record, or terminate calls. |
+| Outbound chat | Sandbox + deployment-supplied | SQLite delivery receipts; provider bundle can supply real delivery. | No SMS/messaging SDK ships. |
+| Human handoff | Sandbox + deployment-supplied | Durable state machine, CAS acceptance, local queue ticket. | No contact-center connector or human desktop ships. |
+| Provider mode | Implemented loader | `PROVIDER_BUNDLE_FACTORY` loads a complete trusted bundle and startup initializes it. | Deployment supplies and certifies vendor adapters and callback security. |
+| YAML procedures | Implemented | Validation, routing, agent instructions, state, branching, escalation. | Not a visual workflow designer. |
+| Reasoning/compliance | Implemented for encoded rules | Z3/SymPy checks and selected Regulation E controls. | Not general legal proof or regulatory approval. |
+| NAM jurisdiction | Implemented framework | Configurable consent, recording, DTMF, and enforcement rules. | Built-in profile requires counsel/operator approval before production use. |
+| Audit integrity | Implemented locally | Hash-linked audit records and verification endpoint. | No packaged WORM archive, external anchoring, or SIEM export. |
+| Authentication/RBAC | Implemented | HMAC JWT, issuer/expiry, roles, permissions, production validation. | No OAuth/OIDC federation. |
+| Readiness/liveness | Implemented | `/health` process status; `/ready` stores, active policy, and provider-bundle state. | External infrastructure monitoring remains deployment work. |
+| Metrics | Partial | Authenticated JSON counts for actions, outbox, procedures, policy, and runtime mode. | No Prometheus exporter or packaged dashboards. |
+| Tracing | Not packaged | Structured correlation logging exists. | No OpenTelemetry exporter ships. |
+| SQLite | Implemented | Development/default/fallback; supported reference topology is one API plus one worker on one host/volume. | Not validated for multi-node/high-write production. |
+| Other databases | Deployment-supplied | Core and policy factory contracts. | No PostgreSQL adapter ships; a URL alone is insufficient. |
+| Shiny UI | Implemented development console | Configurable backend, optional bearer token, canonical v3 chat/data/status APIs, client/import/ASGI tests. | Not a production customer portal; only a subset of operations; no full browser suite. |
+| Swagger | Implemented | OpenAPI, Swagger, ReDoc, HTTP examples, separate WebSocket schemas. | Does not substitute for provider certification. |
+| Docker Compose | Implemented reference | Backend, Shiny UI, and worker; single-worker SQLite production fallback. | Real secrets, TLS, provider bundle, monitoring, backups, and approved storage remain external. |
 
-- A customer-grade web/mobile frontend.
-- Vendor credentials or branded provider SDKs.
-- Legal certification, case-management staffing, or contact-center workforce management.
-- A packaged PostgreSQL adapter; database ports are available for deployment implementations.
+## Supported demonstrations
+
+- customer-service refund and complaint conversations;
+- fraud-alert investigation conversations;
+- Regulation E EFT dispute guidance and encoded checks;
+- typed sandbox actions for refund, store credit, case status, dispute, provisional
+  credit, escalation, note, account flag, SAR, and alert closure;
+- post-commit timeout and reconciliation without duplicate effect;
+- provider message duplication and ordering gaps;
+- policy approval, retirement, restart, and key rotation;
+- simulated handoff queue lifecycle.
+
+These demonstrations are not claims of bank-system integration, contact-center
+staffing, or legal certification.
+
+## Test evidence and exclusions
+
+The deterministic suite covers the engine, persistence, API, provider-bundle
+loading, worker behavior, UI API client, documentation parity, and sandbox failure
+modes. It does not prove:
+
+- Gemini availability or quality with a real account;
+- real audio quality, call signaling, message delivery, human staffing, or business
+  system behavior;
+- browser interaction beyond the current Shiny ASGI/render smoke;
+- performance or multi-node correctness of a deployment database;
+- legal approval.
+
+## Safe product description
+
+Version 3.1.0 is a durable, provider-neutral workflow control plane, SQLite
+reference implementation, integration contract, worker runtime, and development
+console. It is not a turnkey production financial/contact-center platform.
