@@ -1,5 +1,22 @@
 # Core Engine Architecture
 
+## Runtime topology
+
+```text
+Shiny/dev client ──HTTP/WS──▶ FastAPI API process
+                                  │ transactions
+                         Core/Policy/Reference DB
+                                  │ durable lease
+                         Worker process
+                         dispatch + reconciliation
+                                  │ typed ports
+                         sandbox or ProviderBundle
+```
+
+ADK session storage is separate because model/session state is not authoritative.
+The reference application is a modular monolith with an independently supervised
+worker, not a distributed workflow platform.
+
 ## Control-plane decision
 
 v3 remains a modular monolith with explicit ports. ADK 2.4 proposes intent, facts,
@@ -46,6 +63,21 @@ after the configured delay and enters that same query-only reconciliation path.
 
 ## Policy
 
+## End-to-end action sequence
+
+```text
+client → action service: typed command + idempotency key
+action service → authoritative adapter: reload current resource/version
+action service → policy/core: verify permission, facts, consent and active signature
+core → database: commit action + outbox atomically
+worker → provider: dispatch once with stable idempotency key
+provider → worker: succeeded, failed, or unknown
+reconciler → provider: query ambiguous outcome without redispatch
+```
+
+If dispatch may have committed but no response is known, state becomes `unknown`.
+Only succeeded or reconciled evidence supports a customer-visible success claim.
+
 Policy is durable and independent of ADK sessions. Lifecycle is
 `draft -> approved -> active -> retired`; author and approver differ. Approved and
 active canonical payloads are HMAC-SHA256 signed and carry `signing_key_id`. The
@@ -57,6 +89,14 @@ Authorization resolves current policy from the durable repository rather than
 trusting a process-local cache, so multiple API workers observe activation changes.
 
 ## Conversation and handoff invariants
+
+Authentication and customer delegation run before the message enters the inbox.
+The inbox deduplicates `(provider_id, message_id)` and quarantines sequence gaps.
+Duplicate or quarantined turns do not reach ADK or action logic.
+
+Handoff state is `requested → queued → accepted → connected → resolved`. Provider
+acknowledgment means queued, not connected. Compare-and-set transitions prevent two
+human agents from accepting the same handoff.
 
 1. Dedupe key includes provider namespace.
 2. Sequence gaps are quarantined before model or action processing.

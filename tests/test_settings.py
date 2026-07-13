@@ -62,6 +62,15 @@ class TestSettings:
         assert Settings(environment="dev").effective_seed_reference_data is True
         assert Settings(environment="staging").effective_seed_reference_data is False
 
+    def test_provider_mode_requires_bundle_factory(self):
+        with pytest.raises(ValueError, match="PROVIDER_BUNDLE_FACTORY"):
+            Settings(upstream_mode="provider")
+        settings = Settings(
+            upstream_mode="provider",
+            provider_bundle_factory="example.providers:create_bundle",
+        )
+        assert settings.effective_upstream_mode.value == "provider"
+
     def test_log_level_validation(self):
         s = Settings(log_level="debug", google_api_key="test")
         assert s.log_level == "DEBUG"

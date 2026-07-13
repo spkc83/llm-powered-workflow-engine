@@ -1,42 +1,36 @@
-# LLM-Powered Workflow Engine v3.0.0
+# LLM-Powered Workflow Engine v3.1.0
 
-v3 completes the provider-neutral production control-plane foundation. Chat and IVR
-now use one response-safety pipeline; consequential operations use closed typed
-action contracts, atomic outbox delivery, idempotent connectors, and reconciliation.
-Policy governance persists across restart, and upstream dependencies have truthful
-development adapters plus Swagger contracts.
+v3.1 closes the largest usability and honesty gaps found in the end-to-end v3 audit.
 
-## Highlights
+## Application changes
 
-- Shared REST/WebSocket/IVR `ConversationService` with provider-scoped dedupe and
-  durable sequence-gap quarantine.
-- Typed gateway contracts for store credit, case updates, EFT disputes,
-  provisional credit, escalation, notes, account restrictions, SAR submission,
-  and alert closure; specialized refund slice retained.
-- Atomic action/outbox insertion, SQLite-compatible leases, retry quarantine,
-  unknown-outcome reconciliation, and operational APIs.
-- Durable signed policy packages with separate author/approver, key IDs, activation,
-  retirement, and one active procedure/jurisdiction package.
-- STT, TTS, telephony, chat delivery/receipt, action-system, and human-agent ports.
-- SQLite sandbox emulates success, rejection, pre-commit timeout, and post-commit
-  timeout and marks all outputs simulated. Production rejects sandbox mode.
-- Configurable NAM operational consent/retention controls and secure DTMF handling.
-- Truthful human handoff lifecycle from request through connection/resolution.
-- Append-order audit hash chain, action/outbox/quarantine/receipt metrics, and
-  integrity endpoint.
-- Detailed Swagger/OpenAPI examples and upstream integration documentation.
-- Security-updated dependency baseline: Google ADK 2.4, Starlette 1.3.1,
-  PyJWT 2.13, pytest 9.1.1, and pytest-asyncio 1.4.
+- The Shiny development/operator console now uses canonical `/api/v1` routes,
+  honors Docker `BACKEND_URL`, supports an optional bearer token, and includes a
+  system status view.
+- `UPSTREAM_MODE=provider` now loads a trusted complete `ProviderBundle` for STT,
+  TTS, telephony, chat delivery, handoff, authoritative resources, and actions.
+- Action delivery and reconciliation can run continuously as
+  `python -m workflow_engine.worker` and have a dedicated Compose service.
+- `/ready` verifies storage, active policy, and provider-bundle state separately
+  from process liveness.
+- Production reference Compose no longer advertises four API workers on SQLite.
 
-## Upgrade notes
+## Documentation
 
-Follow `docs/migration.md`. Deploy first with adapters disabled, migrate/back up the
-database, verify audit backfill and policy persistence, then conformance-test and
-canary each real provider. The built-in provider implementations are development
-emulators, not production integrations.
+The README was rewritten and the documentation now includes explicit current-state,
+configuration, UI, testing, architecture, provider, storage, API, and operations
+boundaries. Features are classified as implemented, sandbox, deployment-supplied,
+partial, or out of scope.
 
-## Compatibility
+## Verification
 
-Legacy `/api/...`, `/api/v1/chat`, and `/api/v1/ivr/turns` remain. Canonical new
-integrations should use `/api/v1/conversations/turns`, typed core actions, and the
-provider contracts described in `docs/integration-guide.md`.
+- 426 automated tests pass.
+- Ruff, scoped mypy, compileall, Docker Compose validation, documentation parity,
+  and diff checks pass.
+- The Shiny app imports and a live local server smoke renders its HTML.
+
+## Remaining deployment obligations
+
+No vendor adapters or credentials ship in the repository. Real provider bundles,
+TLS, secret management, monitoring/export, approved database adapters, retention,
+and legal/regulatory approval remain deployment responsibilities.
