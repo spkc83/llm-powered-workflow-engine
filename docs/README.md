@@ -1,6 +1,6 @@
 # Documentation
 
-This documentation describes v3.1.0. Start with the architecture and current-state
+This documentation describes v3.2.0. Start with the architecture and current-state
 pages; they explain how the application works and clearly separate implemented
 engine behavior, local simulation, and deployment-supplied integrations.
 
@@ -8,6 +8,7 @@ engine behavior, local simulation, and deployment-supplied integrations.
 
 - [Product and architecture overview](../README.md)
 - [Application architecture and end-to-end flows](architecture.md)
+- [Conversational action bridge and connector registry](action-bridge.md)
 - [Current feature status and limitations](current-state.md)
 - [User and service-operator guide](user-guide.md)
 - [Chat and IVR channels](channels.md)
@@ -16,6 +17,7 @@ engine behavior, local simulation, and deployment-supplied integrations.
 - [Configuration reference](configuration.md)
 - [Shiny development/operator console](ui.md)
 - [Testing and verification](testing.md)
+- [Roadmap and remaining work](roadmap.md)
 
 ## Build and extend
 
@@ -37,5 +39,5 @@ engine behavior, local simulation, and deployment-supplied integrations.
 
 ## Release
 
-- [v3.1 release notes](../RELEASE_NOTES.md)
+- [v3.2 release notes](../RELEASE_NOTES.md)
 - [Changelog](../CHANGELOG.md)

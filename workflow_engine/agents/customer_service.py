@@ -7,9 +7,18 @@ from ..procedures.registry import ProcedureRegistry
 from ..procedures.loader import build_agent_instructions, get_procedure_tools
 from ..settings import get_settings
 from ..tools.catalog import production_safety_instruction, select_model_tools
-from ..tools.crm_tools import lookup_order, get_customer_profile, issue_refund, issue_store_credit, update_case_status, search_orders
-from ..tools.common_tools import escalate_to_supervisor, add_case_note, get_knowledge_article
-from ..tools.dispute_tools import lookup_dispute, check_dispute_eligibility, file_eft_dispute, issue_provisional_credit
+from ..tools.crm_tools import lookup_order, get_customer_profile, search_orders
+from ..tools.common_tools import get_knowledge_article
+from ..tools.dispute_tools import lookup_dispute, check_dispute_eligibility
+from ..tools.action_proposals import (
+    add_case_note,
+    escalate_to_supervisor,
+    file_eft_dispute,
+    issue_provisional_credit,
+    issue_refund,
+    issue_store_credit,
+    update_case_status,
+)
 
 
 CS_PERSONA = """You are a friendly, empathetic, and professional customer service agent.
@@ -76,6 +85,9 @@ Additional guidelines:
 - Store important data from tool calls for reference in later steps
 - If a tool call fails, inform the customer and offer alternatives
 - Never expose internal system details or error messages to the customer
+- Consequential tools only create proposals. Never say an action succeeded when a
+  tool returns `confirmation_required`; explain the preview and wait for the
+  application confirmation control and authoritative action status.
 """
 
 # Map tool name strings (from YAML) to actual Python functions

@@ -11,6 +11,8 @@ provider, browser, and deployment quality.
 | Procedure/agent construction | `test_procedure_*.py`, `test_agent_*.py`, `test_tool_catalog.py` | YAML loading, routing, tool classification, production freeze, agent graph. |
 | Security | `test_auth.py`, `test_settings.py`, `test_guardrails.py` | JWT/RBAC, production validation, response/tool controls. |
 | Persistence | `test_database.py`, `test_v3_integrations.py` | SQLite schema, migration, audit chain, actions, outbox, policy, inbox, handoff. |
+| Action bridge | `test_action_bridge.py`, `test_action_proposal_tools.py` | Proposal-only tools, ownership, evidence, stale data, replay, and typed submission. |
+| Connector registry | `test_action_registry.py`, `test_resource_adapters.py` | Closed catalog, production rejection, OpenAPI pinning, REST timeout/reconcile, resources. |
 | API | `test_api.py` | FastAPI response shapes, routes, Swagger/OpenAPI surface, sandbox action flow. |
 | UI contract | `test_ui_client.py` | Configured backend/token, canonical paths, client behavior, Shiny import/ASGI render. |
 | Documentation contract | `test_documentation_contract.py` | Version/config/route documentation remains aligned with source. |
@@ -54,11 +56,21 @@ Sandbox tests prove the engine's expected provider semantics:
 A real `ProviderBundle` must pass equivalent tests in the deployment environment.
 The repository cannot prove a vendor implementation it does not contain.
 
+Registry tests use an in-memory HTTP transport. They do not certify a real
+service, credential flow, DNS/TLS environment, or provider reconciliation. Every
+deployment binding needs timeout-before/after-commit and idempotency conformance.
+
 ### UI verification
 
 Current tests cover the typed API client and Shiny ASGI rendering. They do not
 exercise every browser click, reactive update, responsive layout, accessibility
 behavior, or identity flow.
+
+Proposal-card helper and client tests are not browser automation. `test_mcp_server.py`
+proves the MCP façade exposes only proposal/status tools plus safe resources/prompts,
+rejects trusted fields, and builds a stateless Streamable HTTP app. It is not a live
+host interoperability test. No generic WebSocket provider runtime exists; its tests
+prove validation/fail-closed behavior. Customer chat WebSocket is separate.
 
 ## What the suite does not prove
 

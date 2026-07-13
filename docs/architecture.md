@@ -66,6 +66,7 @@ flowchart TB
         Browser[Shiny development UI]
         Rest[REST client]
         Ws[WebSocket client]
+        Mcp[MCP host]
         ProviderClient[Provider webhook client]
     end
 
@@ -76,7 +77,9 @@ flowchart TB
         ADK[Bounded ADK runner]
         Procedure[Procedure router and executor]
         Core[CaseKernel and CoreEngine]
+        Bridge[ActionBridge proposal and confirmation]
         Actions[ConsequentialActionService and ActionGateway]
+        Registry[Action connector registry]
         Policy[PolicyService]
         Runtime[ConversationRuntime]
     end
@@ -97,15 +100,20 @@ flowchart TB
     Browser --> Middleware
     Rest --> Middleware
     Ws --> Middleware
+    Mcp --> Middleware
     ProviderClient --> Middleware
     Middleware --> Routes
     Routes --> Conversation
     Conversation --> Runtime
     Conversation --> ADK
     ADK --> Procedure
+    ADK -->|untrusted intent| Bridge
+    Routes -->|host confirm/cancel/status| Bridge
+    Bridge --> Actions
     Routes --> Actions
     Actions --> Core
     Actions --> Policy
+    Actions --> Registry
     Core --> CoreDb
     Runtime --> CoreDb
     Policy --> PolicyDb
@@ -117,10 +125,10 @@ flowchart TB
     Reconcile --> SandboxDb
 ```
 
-The line from `ConversationService` to the core database represents only durable
-inbox/deduplication/order state. It does **not** mean a chat turn automatically
-executes an action. Typed actions enter through separate action endpoints and then
-flow through `ConsequentialActionService` and `ActionGateway`.
+The conversation service never calls a provider. A model action tool can queue an
+intent, and trusted post-processing can create a durable pending proposal. The next
+trust boundary is explicit host confirmation; only then does `ActionBridge` call
+`ConsequentialActionService` and `ActionGateway`.
 
 The Docker configuration starts the API, Shiny UI, and a separate worker service.
 The worker continuously runs action delivery and reconciliation and handles
@@ -159,24 +167,29 @@ service. It:
 duplicate is suppressed. A sequence gap is quarantined until the provider resends
 the missing message.
 
-The service does not create cases, verify business facts, authorize actions, or
-dispatch providers. Its output is a guarded conversational response plus response
-metadata.
+The service does not authorize or dispatch providers. Its output is guarded text,
+response metadata, and optional structured proposal views created by trusted host
+code after the model turn.
 
 ### ADK and agent layer
 
 The router agent selects customer-service, fraud-operations, or general handling.
-Specialist agents use procedure instructions and read/proposal tools. In production,
-the tool catalog removes consequential model tools from the executable tool set.
-
-In development, the catalog currently exposes legacy local write tools so the old
-demonstration scenarios can mutate the reference SQLite database. Those calls do
-not use the v3 typed action gateway and must not be interpreted as the production
-architecture. Production removes them and instructs the model not to claim that a
-frozen action executed.
+Specialist agents use procedure instructions and read/proposal tools. Consequential
+tools are now proposal-only in development and production: they append an untrusted
+intent to ADK state and return `confirmation_required`. They cannot create evidence,
+confirm, call a provider, or claim success. Trusted host code consumes and clears
+those intents after the turn.
 
 The ADK session database is deliberately separate from the core database. Model
 state, prompts, and session history are not trusted evidence for authorization.
+
+### MCP façade
+
+The `/mcp` Streamable HTTP mount is another adapter over `ActionBridge`, not a
+provider or authorization service. It can prepare/read proposals and publish safe
+catalog/status resources and prompts. FastAPI middleware authenticates the host;
+server headers bind customer/procedure/conversation context. MCP exposes no confirm
+or execute tool, so the host REST/UI confirmation boundary remains unchanged.
 
 ### Procedure layer
 
@@ -195,6 +208,7 @@ action is permitted.
 - workflow cases;
 - asserted and verified facts;
 - action attempts and lifecycle events;
+- immutable action proposals and compare-and-set proposal transitions;
 - transactional outbox entries;
 - provider message inbox and ordering state;
 - human-handoff state.
@@ -267,7 +281,10 @@ sequenceDiagram
     participant Conversation
     participant Inbox
     participant ADK
+    participant Bridge
     participant Guardrails
+    participant Host
+    participant ActionCore
 
     Client->>API: POST /api/v1/conversations/turns
     API->>Auth: authenticate actor and bind customer
@@ -284,17 +301,22 @@ sequenceDiagram
     else accepted
         Inbox-->>Conversation: accepted
         Conversation->>ADK: generate bounded proposal/response
-        ADK-->>Conversation: proposed text and workflow state
+        ADK-->>Conversation: text, workflow state, optional action intent
+        Conversation->>Bridge: trusted proposal preparation
+        Bridge-->>Conversation: pending proposal with authoritative preview
         Conversation->>Guardrails: safety and response contract
         Guardrails-->>Conversation: allowed/held response
-        Conversation-->>Client: TurnResult
+        Conversation-->>Client: TurnResult + action_proposals
+        Client->>Host: confirm or cancel proposal
+        Host->>Bridge: authenticated actor/customer confirmation
+        Bridge->>ActionCore: typed action only after revalidation
     end
 ```
 
-This sequence ends with a conversational response. It does not enter the action
-gateway. If the conversation determines that a consequential action is appropriate,
-a trusted client/application integration must make a separate typed action request.
-That integration bridge is not automated by `ConversationService` in v3.1.0.
+The model turn ends with a proposal, not an effect. The confirmed host request is a
+separate API operation and trust decision. Proposal preparation may happen during
+chat post-processing, but provider execution never happens merely because the model
+called a tool.
 
 ### Why conversation and action are separate
 
@@ -302,17 +324,19 @@ The separation prevents a model utterance such as “I will refund that now” f
 becoming a financial effect. Conversation is allowed to be probabilistic; action
 authorization must be deterministic and evidence-backed.
 
-There are therefore two application entry paths:
+There are three bounded phases:
 
 1. **Conversation path** — `/chat`, `/conversations/turns`, or WebSocket → inbox
    acceptance → ADK/procedure → guardrails/reasoning → response.
-2. **Action path** — `/core/actions` or `/core/refunds` → authoritative resource
-   reload → case/facts → RBAC/policy/evidence → action/outbox → worker/provider.
+2. **Proposal/confirmation path** — action intent → authoritative preview and
+   immutable pending proposal → host confirm/cancel.
+3. **Action path** — confirmed proposal, `/core/actions`, or `/core/refunds` →
+   authoritative reload → case/facts → RBAC/policy/evidence → action/outbox →
+   connector/provider.
 
-The intended product integration may use the result of a conversation to populate
-an action form or command, but it must not trust model-generated parameters. It must
-submit typed identifiers, consent/approval evidence, and an idempotency key; the
-action service reloads authoritative values before authorization.
+`ActionBridge` derives policy, case, identity, idempotency, resource version, and
+connector binding in trusted code. The Shiny client uses only the proposal ID when
+confirming; it cannot replace the stored payload or provider URL.
 
 The compatibility `/api/v1/chat` endpoint delegates to the same processing path.
 The WebSocket endpoint uses the same conversation service but returns WebSocket
@@ -350,6 +374,9 @@ transcript hint, and TTS returns a fake media reference.
 
 ## 7. Consequential action lifecycle
 
+The complete proposal design and registry schema are documented in
+[Conversational Action Bridge](action-bridge.md).
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -366,15 +393,20 @@ sequenceDiagram
     ActionService->>Policy: resolve active signed policy
     Policy-->>ActionService: allowed action and requirements
     ActionService->>CoreDB: transaction: action + authorized event + outbox
-    CoreDB-->>Client: authorized action ID
-    Worker->>CoreDB: lease outbox record
-    Worker->>Provider: dispatch with stable idempotency key
+    ActionService->>Provider: synchronous first dispatch with stable idempotency key
     alt success or rejection
-        Provider-->>Worker: definitive outcome
-        Worker->>CoreDB: terminal action event
+        Provider-->>ActionService: definitive outcome
+        ActionService->>CoreDB: terminal action event
     else timeout after possible commit
-        Provider--xWorker: ambiguous timeout
-        Worker->>CoreDB: mark unknown
+        Provider--xActionService: ambiguous timeout
+        ActionService->>CoreDB: mark unknown
+    else request path stops before dispatch
+        Worker->>CoreDB: lease outbox record
+        Worker->>Provider: dispatch still-authorized action
+        Provider-->>Worker: definitive or ambiguous outcome
+        Worker->>CoreDB: persist outcome
+    end
+    alt action remains unknown
         Worker->>Provider: query-only reconciliation
         Provider-->>Worker: committed/not committed/unknown
         Worker->>CoreDB: reconciled outcome
@@ -469,9 +501,9 @@ appropriate production login design.
 
 | Mode | Intended use | Upstream behavior |
 |---|---|---|
-| `dev` + sandbox | Local development and deterministic tests | SQLite emulators enabled. |
+| `dev` + sandbox | Local development and deterministic tests | Proposal cards and SQLite action bindings enabled. |
 | staging/production + disabled | Safe integration preparation | Consequential/provider endpoints fail closed. |
-| provider | Deployment integration mode | Loads a trusted, complete `ProviderBundle`; vendor code and credentials are deployment-supplied. |
+| provider | Deployment integration mode | Loads channel/resource adapters from `ProviderBundle`; actions may use the bundle connector or `ACTION_REGISTRY_PATH`. |
 
 The production Compose file is a reference boundary, not a complete production
 platform. It includes one API process and one worker process for the supported
@@ -495,6 +527,8 @@ responsibilities.
 ## 14. What is deliberately out of scope today
 
 - real STT, TTS, telephony, chat, contact-center, and business-system providers;
+- a generic WebSocket provider connector runtime (binding schema only);
+- MCP confirmation/execution/provider tools; the mounted façade is proposal/status only;
 - a customer-grade production web portal;
 - packaged PostgreSQL or another distributed database adapter;
 - a full policy-authoring product;

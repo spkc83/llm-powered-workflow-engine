@@ -1,8 +1,8 @@
 """Single application pipeline used by REST chat, WebSocket chat, and IVR turns."""
 
-from typing import Protocol
+from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from workflow_engine.conversation.contracts import ResponseContract, RiskLevel
 from workflow_engine.conversation.runtime import ChannelKind, ConversationRuntime, MessageEnvelope
@@ -15,6 +15,7 @@ class TurnContext(BaseModel):
     customer_id: str
     owner_id: str
     conversation_id: str
+    message_id: str
     channel: ChannelKind
     locale: str
     timezone: str
@@ -24,6 +25,7 @@ class GeneratedTurn(BaseModel):
     text: str
     risk: RiskLevel = RiskLevel.INFORMATIONAL
     authoritative_status: str | None = None
+    action_proposals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TurnResult(BaseModel):
@@ -40,6 +42,7 @@ class TurnResult(BaseModel):
     may_claim_success: bool
     requires_approved_content: bool
     requires_readback: bool
+    action_proposals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TurnProcessor(Protocol):
@@ -84,6 +87,7 @@ class ConversationService:
                 may_claim_success=False,
                 requires_approved_content=False,
                 requires_readback=False,
+                action_proposals=[],
             )
         context = TurnContext(
             actor_id=actor_id,
@@ -92,6 +96,7 @@ class ConversationService:
             customer_id=envelope.customer_id,
             owner_id=owner_id,
             conversation_id=envelope.conversation_id,
+            message_id=envelope.message_id,
             channel=envelope.channel,
             locale=envelope.locale,
             timezone=envelope.timezone,
@@ -117,4 +122,5 @@ class ConversationService:
             may_claim_success=decision.may_claim_success,
             requires_approved_content=decision.requires_approved_content,
             requires_readback=decision.requires_readback or input_requires_readback,
+            action_proposals=generated.action_proposals,
         )

@@ -1,4 +1,4 @@
-# Migration from v2.0 to v3.0
+# Migration from v2.0 through v3.2
 
 ## Major changes
 
@@ -14,12 +14,16 @@
 - NAM operational controls are configurable and enforced outside development by
   default.
 - Audit records form a SHA-256 chain.
+- v3.2 replaces direct model write demonstrations with proposal-only tools, durable
+  action proposals, host confirmation, and a per-action connector registry.
 
 ## Configuration additions
 
 Review `.env.example`: `POLICY_DATABASE_URL`, `POLICY_SIGNING_KEY_ID`,
 `UPSTREAM_MODE`, `SANDBOX_DATABASE_URL`, worker lease/reconciliation settings,
 `JURISDICTION_CONFIG_PATH`, and `JURISDICTION_ENFORCE`.
+For v3.2 also review `ACTION_REGISTRY_PATH` and
+`ACTION_SECRET_PROVIDER_FACTORY`.
 
 Do not set sandbox mode in production. `provider` mode requires deployment wiring
 for real ports; the reference app remains fail closed otherwise.
@@ -37,9 +41,13 @@ for real ports; the reference app remains fail closed otherwise.
    post-commit timeout reconciliation, and handoff transitions.
 6. Implement and test real adapters against `docs/integration-guide.md`.
 7. Canary one procedure/channel before enabling each provider or action.
+8. For v3.2, verify proposal create/confirm/cancel/replay, resource/binding changes,
+   Shiny action cards, catalog bindings, and retained connector contract versions.
 
 The old inbox tables remain for migration history; v3 uses
 `conversation_inbox_v3`. Do not delete old evidence until retention approval.
+Core startup creates the `action_proposals` table. Existing typed action records do
+not need synthetic proposals; direct service/API actions remain valid history.
 
 ## Rollback
 

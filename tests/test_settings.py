@@ -71,6 +71,14 @@ class TestSettings:
         )
         assert settings.effective_upstream_mode.value == "provider"
 
+    def test_action_registry_configuration_is_typed(self, tmp_path):
+        settings = Settings(
+            action_registry_path=tmp_path / "actions.yaml",
+            action_secret_provider_factory="deployment.secrets:create_provider",
+        )
+        assert settings.action_registry_path == tmp_path / "actions.yaml"
+        assert settings.action_secret_provider_factory == "deployment.secrets:create_provider"
+
     def test_log_level_validation(self):
         s = Settings(log_level="debug", google_api_key="test")
         assert s.log_level == "DEBUG"

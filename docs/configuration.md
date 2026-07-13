@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Version 3.1.0 configuration is defined by `workflow_engine.settings.Settings`.
+Version 3.2.0 configuration is defined by `workflow_engine.settings.Settings`.
 Values come from environment variables and an optional `.env` file; names are
 case-insensitive. Unknown variables are ignored, so use the contract tests and this
 page to detect misspellings.
@@ -99,6 +99,8 @@ procedure YAML, prompts, logs, or images.
 |---|---|---|
 | `UPSTREAM_MODE` | sandbox in dev, disabled elsewhere | `disabled`, `sandbox`, or `provider`. |
 | `PROVIDER_BUNDLE_FACTORY` | unset | Trusted `module:callable` returning a complete `ProviderBundle`; required in provider mode. |
+| `ACTION_REGISTRY_PATH` | unset | Versioned YAML/JSON closed-action connector bindings. Relative OpenAPI paths resolve from this file. |
+| `ACTION_SECRET_PROVIDER_FACTORY` | unset | Trusted `module:callable` returning a resolver for `secret://` references. |
 | `ACTION_WORKER_LEASE_SECONDS` | `30` | Outbox lease duration. |
 | `ACTION_RECONCILIATION_DELAY_SECONDS` | `30` | Minimum age between ambiguity queries. |
 
@@ -106,6 +108,23 @@ The provider factory receives validated `Settings` and returns adapters for STT,
 TTS, telephony, chat, handoff, action dispatch/reconciliation, and authoritative
 resources. Configuration is code execution: allow-list and control the installed
 package.
+
+`ACTION_REGISTRY_PATH` optionally replaces the bundle's single action connector
+with per-action bindings. It does not replace STT, TTS, telephony, chat, handoff,
+or authoritative-resource adapters, so `UPSTREAM_MODE=provider` still requires a
+complete provider bundle. Supported action transports are:
+
+- `sqlite` — development/demo only; the composition root supplies the connector;
+- `rest` — built-in HTTP runtime with pinned OpenAPI validation, host allowlist,
+  idempotency, explicit outcome mapping, and reconciliation;
+- `python` — trusted connector factory escape hatch;
+- `websocket` — validated contract only; no generic runtime.
+
+Registry configuration is described field-by-field with examples in
+[Conversational Action Bridge](action-bridge.md). Production rejects SQLite,
+non-HTTPS REST, non-WSS WebSocket, inline credentials, unknown action names,
+disallowed hosts, and asynchronous REST mappings without reconciliation. The
+built-in secret resolver supports `env://NAME`; `secret://...` requires the factory.
 
 Sandbox mode is rejected in production. Provider mode without a bundle factory is
 also rejected.
@@ -123,7 +142,7 @@ also rejected.
 
 `/api/v1/metrics` is an authenticated JSON operational snapshot. Prometheus and
 OpenTelemetry exporters are not packaged, and there are no inactive metrics/tracing
-settings in 3.1.0.
+settings in 3.2.0.
 
 ## Shiny operator console
 
@@ -134,6 +153,16 @@ settings in 3.1.0.
 
 A static token is acceptable only for controlled development/operations. Use an
 identity-aware frontend for production users.
+
+## MCP host context
+
+The Streamable HTTP MCP mount at `/mcp` uses normal `AUTH_ENABLED` bearer
+authentication; it has no separate enable/secret setting. Staff/integration hosts
+must bind the serviced customer with `X-Workflow-Customer-ID`. Optional
+`X-Workflow-Procedure-ID`, `X-Workflow-Conversation-ID`, and
+`X-Workflow-Message-ID` bind server-trusted routing/correlation. Customer-role
+tokens ignore a supplied customer header and use the token identity. Development
+without auth defaults to the dev admin and `CUST-456`.
 
 ## Production startup rejection
 
@@ -159,4 +188,5 @@ ADK_SESSION_DATABASE_URL=sqlite+aiosqlite:///data/adk_sessions_v2.db
 POLICY_DATABASE_URL=sqlite+aiosqlite:///data/workflow.db
 UPSTREAM_MODE=sandbox
 SANDBOX_DATABASE_URL=sqlite+aiosqlite:///data/upstream_sandbox.db
+# Optional: ACTION_REGISTRY_PATH=./config/actions.yaml
 ```

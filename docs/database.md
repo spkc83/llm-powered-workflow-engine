@@ -27,6 +27,7 @@ Audit rows carry `previous_hash` and `entry_hash`.
 | `case_facts` | Value, authority, source, evidence, expiry, supersession. |
 | `action_attempts` | Command, unique idempotency key, lifecycle, outcome. |
 | `action_events` | Append-oriented requested, authorized, dispatched, and outcome evidence. |
+| `action_proposals` | Immutable intent/context/preview plus pending/confirmed/cancelled/expired CAS state. |
 | `core_outbox` | Durable dispatch topic, lease, attempts, retry/quarantine. |
 | `conversation_inbox_v3` | Provider-scoped messages and ordering status. |
 | `conversation_sequences` | Last accepted provider/conversation sequence. |
@@ -59,6 +60,7 @@ must pass the same conformance behavior:
 
 - atomic optimistic compare-and-swap;
 - action plus outbox commit in one transaction;
+- atomic proposal creation and compare-and-set lifecycle transitions;
 - compare-and-set action lifecycle transitions so dispatch/reconciliation races
   cannot overwrite terminal evidence;
 - unique business idempotency;
@@ -73,3 +75,7 @@ retention differ and ADK state is untrusted for authorization.
 The packaged SQLite topology is intentionally small: one API worker and one action
 worker on the same host/volume. Multi-node or high-write deployments must provide a
 conforming external adapter; this repository does not include PostgreSQL support.
+
+Registry files and pinned OpenAPI documents are deployment configuration, not
+database authority. Proposal/action rows store connector binding and contract
+versions; retain matching configuration and connector code through retention.

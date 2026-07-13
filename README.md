@@ -7,7 +7,7 @@ The application combines Google ADK/Gemini conversations with deterministic
 procedures, durable cases and facts, signed policy, typed consequential actions,
 transactional delivery, reconciliation, and audit evidence.
 
-> Current status: v3.1.0 is a substantive SQLite-backed engine and development
+> Current status: v3.2.0 is a substantive SQLite-backed engine and development
 > reference implementation. Real speech, telephony, chat, contact-center, action
 > providers, a production database adapter, and a production-grade UI are not
 > included. See [Current Implementation Status](docs/current-state.md).
@@ -32,12 +32,13 @@ account restriction, dispute, SAR, case change, or human transfer.
 ```mermaid
 flowchart LR
     Client[Chat / WebSocket / IVR client]
-    Trusted[Trusted action client / application integration]
     API[FastAPI + Auth/RBAC]
     Conversation[Shared ConversationService]
     Inbox[(Durable inbox/order state)]
     ADK[Bounded ADK/Gemini layer]
     Procedure[YAML procedure executor]
+    Proposal[Trusted ActionBridge]
+    Confirm[Host confirmation]
     Action[Typed ActionService + Gateway]
     Core[(Cases, facts, policy, actions)]
     Outbox[(Transactional outbox)]
@@ -49,8 +50,10 @@ flowchart LR
     Conversation --> Inbox
     Conversation --> ADK
     ADK --> Procedure
-    Trusted --> API
-    API --> Action
+    ADK -->|proposal intent only| Proposal
+    Proposal -->|structured pending proposal| API
+    API --> Confirm
+    Confirm -->|confirmed proposal| Action
     Action --> Core
     Action --> Outbox
     Outbox --> Worker
@@ -60,10 +63,11 @@ flowchart LR
 The full architecture, trust boundaries, transaction boundaries, state machines,
 and request sequences are explained in [Application Architecture](docs/architecture.md).
 
-Chat and actions are deliberately separate entry paths. A chat turn can collect
-information and ask for consent, but `ConversationService` does not automatically
-submit a consequential action. A trusted client or application integration must
-construct the typed action request with policy, evidence, and idempotency context.
+Conversation and action execution remain separate trust domains, but v3.2 connects
+them through a typed two-step bridge. A model tool may queue an action intent. The
+host validates it against the closed action catalog, reloads authoritative data,
+derives identity/policy/idempotency/binding context, and returns a durable proposal.
+Only a trusted host confirmation can submit that proposal to the action core.
 
 ## What works today
 
@@ -85,6 +89,12 @@ construct the typed action request with policy, evidence, and idempotency contex
   settings validation.
 - Swagger/OpenAPI HTTP contracts and machine-readable WebSocket frame schemas.
 - Deterministic local provider emulators and failure injection.
+- Durable `pending -> confirmed|cancelled|expired` action proposals.
+- Model-to-core proposal bridge with structured chat responses and host-only confirmation.
+- Shiny action cards with authoritative preview, confirm/cancel, status, and event history.
+- Startup-validated per-action SQLite, REST/OpenAPI, and Python connector registry.
+- Authenticated Streamable HTTP MCP façade for safe action prepare/status tools,
+  catalog/status resources, and workflow/safety prompts.
 
 ### Simulated or partial
 
@@ -93,9 +103,12 @@ construct the typed action request with policy, evidence, and idempotency contex
 - Telephony acknowledges events; it does not control calls.
 - Chat delivery records local receipts; it does not send messages externally.
 - Human handoff creates a SQLite ticket; it does not connect to a contact center.
-- Action execution writes simulated SQLite effects; it does not update a real
-  upstream system.
-- The Shiny UI is a tested development/operator console, not a production customer portal.
+- Demo action execution writes SQLite effects through the same proposal, policy,
+  typed gateway, idempotency, and event path used by provider connectors.
+- WebSocket provider bindings are schema/validation contracts only; no generic
+  WebSocket command runtime ships.
+- The Shiny UI is a tested development/operator console with action confirmation,
+  not a production customer portal.
 - Metrics are a JSON snapshot; Prometheus and OpenTelemetry are not implemented.
 - A separate worker process continuously handles delivery and reconciliation.
 
@@ -106,21 +119,32 @@ construct the typed action request with policy, evidence, and idempotency contex
 - customer-grade production frontend;
 - enterprise identity federation, managed TLS, secrets, SIEM, or WORM storage;
 - legal certification of the default NAM/Reg E profile.
+- MCP confirmation or execution tools (the mounted MCP façade is proposal/status only);
+- arbitrary config-only creation of new consequential actions.
 
 See the complete [capability matrix](docs/current-state.md).
 
 ## Main runtime flows
 
-### Conversation
+### Customer chat and action
 
 1. A REST, WebSocket, or IVR client submits a normalized message.
 2. Authentication binds the actor to the serviced customer.
 3. Jurisdiction, consent, and sensitive-input rules run.
 4. The durable inbox suppresses duplicates and quarantines sequence gaps.
 5. ADK selects a specialist and follows a YAML procedure.
-6. Guardrails and deterministic reasoning inspect the response.
-7. The response contract decides whether text may stream and whether a success
-   claim is allowed.
+6. Read tools may inspect data. Consequential model tools can only queue an
+   untrusted action intent; they cannot execute an effect.
+7. Trusted host code turns a valid intent into a durable proposal containing an
+   authoritative preview, expiry, policy/procedure binding, and connector version.
+8. Guardrails inspect the conversational response; the API returns text plus a
+   structured `action_proposals` list.
+9. Shiny displays Confirm and Cancel controls. Confirmation is a separate host API
+   request and creates server-owned evidence.
+10. The bridge rechecks proposal ownership, expiry, resource version, connector
+    binding, consent/approval requirements, then calls the typed action service.
+11. The action core authorizes and dispatches/reconciles the effect. The UI reads
+    authoritative action status and event history; it never infers success from text.
 
 ### Consequential action
 
@@ -128,9 +152,12 @@ See the complete [capability matrix](docs/current-state.md).
 2. The service reloads the resource and rejects caller/resource mismatches.
 3. RBAC, signed policy, evidence, consent, and approval rules run.
 4. Authorization and outbox insertion commit atomically.
-5. A worker dispatches using a stable provider idempotency key.
-6. Definitive outcomes become terminal evidence.
-7. Ambiguous timeouts become `unknown` and are reconciled by querying the provider;
+5. The request path attempts the first dispatch using a stable provider idempotency
+   key; the atomic outbox is the durable recovery path if that attempt is interrupted.
+6. A worker leases the outbox, dispatches only actions still `authorized`, and
+   settles already-terminal records without repeating their provider effect.
+7. Definitive outcomes become terminal evidence. Ambiguous timeouts become
+   `unknown` and are reconciled by querying the provider;
    the engine does not blindly redispatch.
 
 See [Application Architecture](docs/architecture.md) for sequence diagrams.
@@ -210,11 +237,13 @@ The canonical API prefix is `/api/v1`.
 | Conversation | `POST /api/v1/conversations/turns`, `POST /api/v1/chat`, `WS /api/v1/ws/chat` |
 | IVR adapters | `/api/v1/integrations/ivr/stt:transcribe`, `/tts:synthesize`, `/telephony/events` |
 | Chat provider | `/api/v1/integrations/chat/deliveries`, `/receipts` |
-| Actions | `POST /api/v1/core/actions`, `POST /api/v1/core/refunds` |
+| Action bridge | `GET /api/v1/actions/catalog`, proposal create/list/get/confirm/cancel, `GET /api/v1/actions/{action_id}` |
+| Direct typed actions | `POST /api/v1/core/actions`, `POST /api/v1/core/refunds` |
 | Human handoff | `/api/v1/handoffs` and callback/status routes |
 | Policy | `/api/v1/policies` and approve/activate/retire routes |
 | Operations | actions, events, outbox, quarantine, receipts, audit integrity, workers, metrics |
 | Contracts | `GET /api/v1/integrations/contracts` |
+| MCP | Streamable HTTP `/mcp` with proposal/status only; no confirm/execute tool |
 
 The detailed route, permission, lifecycle, and error reference is in
 [API Reference](docs/api.md). Swagger is the authoritative HTTP schema.
@@ -262,7 +291,7 @@ Read [Threat Model](docs/threat-model.md) and [Security Policy](SECURITY.md).
 
 ## Tests
 
-The deterministic suite currently contains 426 tests:
+Run the deterministic suite with:
 
 ```bash
 pytest -q
@@ -275,11 +304,12 @@ It does not test real providers, complete browser interaction, or legal certific
 
 ```text
 main.py                         FastAPI composition root and routes
-app_ui.py                       Shiny development UI (legacy/partial)
+app_ui.py                       Shiny development/operator UI with action cards
 procedures/                     YAML conversational procedures
 workflow_engine/agents/         ADK router and specialist agents
 workflow_engine/conversation/   shared chat/IVR processing and response contracts
 workflow_engine/core/           kernel, policy, action gateway, workers, routing
+workflow_engine/actions/        trusted proposal/confirmation bridge
 workflow_engine/integrations/   provider protocols and SQLite sandbox adapters
 workflow_engine/database/       reference schema, seeding, repositories, audit
 workflow_engine/auth/           JWT identities, roles, and permissions
@@ -291,6 +321,8 @@ docs/                           architecture, operation, integration, and user m
 ## Documentation map
 
 - [Application Architecture](docs/architecture.md) — how the system works end to end.
+- [Conversational Action Bridge](docs/action-bridge.md) — proposal, confirmation,
+  registry, demo, and production-provider contracts.
 - [Current Implementation Status](docs/current-state.md) — implemented, partial,
   sandbox, deployment-supplied, and missing capabilities.
 - [Configuration Reference](docs/configuration.md) — every configuration group and
@@ -305,6 +337,7 @@ docs/                           architecture, operation, integration, and user m
 - [Governance](docs/governance.md) — policy and jurisdiction.
 - [Threat Model](docs/threat-model.md) — trust boundaries and residual risk.
 - [Migration](docs/migration.md) — v2 to v3 upgrade.
+- [Roadmap](docs/roadmap.md) — verified gaps and ordered next work.
 - [Procedure Authoring](docs/procedures.md) — YAML workflow extension.
 - [Chat and IVR Channels](docs/channels.md) — channel contracts.
 - [User Guide](docs/user-guide.md) — customer and service-operator behavior.

@@ -1,5 +1,7 @@
 """Shiny for Python chat UI for the LLM Workflow Engine."""
 
+import json
+
 import httpx
 import pandas as pd
 from shiny import App, reactive, render, ui
@@ -123,6 +125,170 @@ TEST_SCENARIOS = {
 }
 
 
+def _proposal_list(payload):
+    """Normalize proposal responses from chat, list, and single-record endpoints."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("action_proposals", "proposals", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    nested = payload.get("proposal")
+    if isinstance(nested, dict):
+        return [nested]
+    return [payload] if payload.get("proposal_id") else []
+
+
+def _proposal_state(proposal):
+    return str(proposal.get("state") or proposal.get("status") or "pending").lower()
+
+
+def _proposal_action_id(proposal):
+    direct = proposal.get("action_id")
+    if direct:
+        return str(direct)
+    result = proposal.get("result")
+    if isinstance(result, dict) and result.get("action_id"):
+        return str(result["action_id"])
+    return None
+
+
+def _action_record(payload):
+    """Extract an action record from confirmation and status response envelopes."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("action", "action_record", "receipt"):
+        nested = payload.get(key)
+        if isinstance(nested, dict) and nested.get("action_id"):
+            record = dict(nested)
+            for event_key in ("events", "event_history"):
+                if event_key in payload and event_key not in record:
+                    record[event_key] = payload[event_key]
+            return record
+    return payload if payload.get("action_id") else None
+
+
+async def _confirm_and_load_action(client, proposal_id):
+    """Run the same confirmation/status sequence used by the Shiny handler."""
+    response = await client.confirm_action_proposal(str(proposal_id))
+    record = _action_record(response)
+    if record and record.get("action_id"):
+        authoritative = await client.action_status(str(record["action_id"]))
+        record = _action_record(authoritative) or record
+    return response, record
+
+
+def _json_block(value):
+    return json.dumps(value, indent=2, sort_keys=True, default=str)
+
+
+def _action_event_button(input_name, identifier, label, class_name):
+    encoded = json.dumps(str(identifier)).replace("</", "<\\/")
+    return ui.tags.button(
+        label,
+        type="button",
+        class_=class_name,
+        onclick=(
+            f"Shiny.setInputValue('{input_name}', {encoded}, "
+            "{priority: 'event'})"
+        ),
+    )
+
+
+def _action_proposal_card(proposal, action_detail=None, error=None):
+    """Render a structured proposal without parsing conversational prose."""
+    proposal_id = str(proposal.get("proposal_id") or "unknown")
+    action_name = str(proposal.get("action") or "consequential action")
+    state = _proposal_state(proposal)
+    action_id = _proposal_action_id(proposal)
+    if not action_id and isinstance(action_detail, dict):
+        action_id = action_detail.get("action_id")
+    preview = proposal.get("safe_preview") or proposal.get("preview") or {}
+    badge_class = {
+        "pending": "text-bg-warning",
+        "confirmed": "text-bg-primary",
+        "cancelled": "text-bg-secondary",
+        "expired": "text-bg-dark",
+    }.get(state, "text-bg-info")
+
+    controls = []
+    if state == "pending":
+        controls.extend(
+            [
+                _action_event_button(
+                    "action_confirm",
+                    proposal_id,
+                    "Confirm action",
+                    "btn btn-success btn-sm me-2",
+                ),
+                _action_event_button(
+                    "action_cancel",
+                    proposal_id,
+                    "Cancel",
+                    "btn btn-outline-secondary btn-sm",
+                ),
+            ]
+        )
+    if action_id:
+        controls.append(
+            _action_event_button(
+                "action_refresh",
+                action_id,
+                "Refresh status",
+                "btn btn-outline-primary btn-sm ms-2",
+            )
+        )
+
+    details = []
+    if action_detail:
+        status = action_detail.get("status", "unknown")
+        details.extend(
+            [
+                ui.tags.h6(f"Action status: {status}", class_="mt-3"),
+                ui.tags.pre(
+                    _json_block(
+                        {
+                            key: value
+                            for key, value in action_detail.items()
+                            if key in {"action_id", "status", "outcome", "events", "event_history"}
+                        }
+                    ),
+                    class_="small bg-light border rounded p-2 mb-0",
+                ),
+            ]
+        )
+
+    return ui.card(
+        ui.card_header(
+            ui.tags.span(action_name.replace("_", " ").title()),
+            ui.tags.span(state, class_=f"badge {badge_class} float-end"),
+        ),
+        ui.tags.p(
+            "Review the authoritative action preview before confirming. "
+            "The assistant cannot confirm this action for you.",
+            class_="small text-muted",
+        ),
+        ui.tags.pre(
+            _json_block(preview), class_="small bg-light border rounded p-2"
+        ),
+        ui.tags.div(
+            ui.tags.small(f"Proposal: {proposal_id}", class_="text-muted"),
+            ui.tags.br(),
+            ui.tags.small(
+                f"Expires: {proposal.get('expires_at', 'not supplied')}",
+                class_="text-muted",
+            ),
+            class_="mb-2",
+        ),
+        ui.tags.div(*controls),
+        ui.tags.p(error, class_="text-danger small mt-2 mb-0") if error else None,
+        *details,
+        class_="mb-3 border-primary",
+    )
+
+
 def _scenario_button(scenario, idx, category):
     btn_id = f"scenario_{category}_{idx}"
     return ui.tags.div(
@@ -165,7 +331,19 @@ app_ui = ui.page_sidebar(
     ui.navset_tab(
         ui.nav_panel(
             "Chat",
+            ui.tags.div(
+                ui.tags.strong("Typed action demo"),
+                ui.tags.span(
+                    " — When the backend runs in demo/sandbox mode, confirmed actions "
+                    "use the SQLite provider emulator but still pass through the same "
+                    "v3 typed gateway, authorization, policy, evidence, and idempotency "
+                    "controls used by production connectors. Chat can propose; only you "
+                    "can confirm.",
+                ),
+                class_="alert alert-info py-2 small",
+            ),
             ui.chat_ui("chat"),
+            ui.output_ui("action_proposal_cards"),
         ),
         ui.nav_panel(
             "Test Scenarios",
@@ -234,8 +412,56 @@ def server(input, output, session):
     selected_customer = reactive.value("CUST-456")
     table_rows = reactive.value([])
     workflow_state = reactive.value({})
+    action_proposals = reactive.value([])
+    action_details = reactive.value({})
+    action_errors = reactive.value({})
 
     chat = ui.Chat("chat")
+
+    def _remember_proposals(payload):
+        incoming = _proposal_list(payload)
+        if not incoming:
+            return
+        merged = {
+            str(item.get("proposal_id")): item
+            for item in action_proposals()
+            if item.get("proposal_id")
+        }
+        for item in incoming:
+            proposal_id = item.get("proposal_id")
+            if proposal_id:
+                merged[str(proposal_id)] = item
+        action_proposals.set(list(merged.values()))
+
+    def _patch_proposal(proposal_id, **changes):
+        updated = []
+        for proposal in action_proposals():
+            if str(proposal.get("proposal_id")) == str(proposal_id):
+                proposal = {**proposal, **changes}
+            updated.append(proposal)
+        action_proposals.set(updated)
+
+    async def _refresh_action_proposals():
+        sid = session_id()
+        if sid is None:
+            return
+        try:
+            _remember_proposals(await api.action_proposals(sid))
+        except httpx.HTTPError:
+            # Chat remains usable against an older backend during rolling upgrades.
+            return
+
+    async def _refresh_action(action_id):
+        try:
+            detail = await api.action_status(action_id)
+            record = _action_record(detail) or detail
+            current = dict(action_details())
+            current[str(action_id)] = record
+            action_details.set(current)
+        except httpx.HTTPError as exc:
+            errors = dict(action_errors())
+            errors[str(action_id)] = f"Could not refresh action status: {exc}"
+            action_errors.set(errors)
 
     # --- Customer selector ---
 
@@ -279,6 +505,8 @@ def server(input, output, session):
             data = await api.chat(payload)
             session_id.set(data["session_id"])
             await chat.append_message({"role": "assistant", "content": data["response"]})
+            _remember_proposals(data)
+            await _refresh_action_proposals()
             await _refresh_workflow_state()
         except httpx.HTTPStatusError as e:
             await chat.append_message({"role": "assistant", "content": f"Error: {e.response.status_code} — {e.response.text}"})
@@ -321,6 +549,100 @@ def server(input, output, session):
                 )
         return ui.tags.div(*items) if items else ui.p("No active workflow", class_="text-muted small")
 
+    # --- Typed action proposals ---
+
+    @render.ui
+    def action_proposal_cards():
+        proposals = action_proposals()
+        if not proposals:
+            return ui.tags.div(
+                ui.tags.h5("Action proposals"),
+                ui.tags.p(
+                    "No pending actions. Ask the assistant to perform a supported "
+                    "action; a structured confirmation card will appear here.",
+                    class_="text-muted small",
+                ),
+                class_="mt-3",
+            )
+        details = action_details()
+        errors = action_errors()
+        cards = []
+        for proposal in proposals:
+            action_id = _proposal_action_id(proposal)
+            detail = details.get(str(action_id)) if action_id else None
+            error = errors.get(str(proposal.get("proposal_id")))
+            if not error and action_id:
+                error = errors.get(str(action_id))
+            cards.append(_action_proposal_card(proposal, detail, error))
+        return ui.tags.div(ui.tags.h5("Action proposals"), *cards, class_="mt-3")
+
+    @reactive.effect
+    @reactive.event(input.action_confirm)
+    async def _confirm_action_proposal():
+        proposal_id = input.action_confirm()
+        if not proposal_id:
+            return
+        try:
+            response, record = await _confirm_and_load_action(api, str(proposal_id))
+            _remember_proposals(response)
+            if record:
+                details = dict(action_details())
+                details[str(record["action_id"])] = record
+                action_details.set(details)
+                _patch_proposal(
+                    proposal_id,
+                    status="confirmed",
+                    action_id=record["action_id"],
+                )
+            await _refresh_action_proposals()
+            proposal = next(
+                (
+                    item
+                    for item in action_proposals()
+                    if str(item.get("proposal_id")) == str(proposal_id)
+                ),
+                None,
+            )
+            action_id = _proposal_action_id(proposal or {})
+            if action_id:
+                await _refresh_action(action_id)
+            await chat.append_message(
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Action confirmation was submitted through the typed gateway. "
+                        "The authoritative status is shown in the action card below."
+                    ),
+                }
+            )
+        except httpx.HTTPError as exc:
+            errors = dict(action_errors())
+            errors[str(proposal_id)] = f"Confirmation failed: {exc}"
+            action_errors.set(errors)
+
+    @reactive.effect
+    @reactive.event(input.action_cancel)
+    async def _cancel_action_proposal():
+        proposal_id = input.action_cancel()
+        if not proposal_id:
+            return
+        try:
+            response = await api.cancel_action_proposal(str(proposal_id))
+            _remember_proposals(response)
+            _patch_proposal(proposal_id, status="cancelled")
+            await _refresh_action_proposals()
+        except httpx.HTTPError as exc:
+            errors = dict(action_errors())
+            errors[str(proposal_id)] = f"Cancellation failed: {exc}"
+            action_errors.set(errors)
+
+    @reactive.effect
+    @reactive.event(input.action_refresh)
+    async def _refresh_action_status():
+        action_id = input.action_refresh()
+        if action_id:
+            await _refresh_action(str(action_id))
+
     # --- Session management ---
 
     # Track known sessions: list of {session_id, label}
@@ -339,6 +661,9 @@ def server(input, output, session):
     async def _new_session():
         session_id.set(None)
         workflow_state.set({})
+        action_proposals.set([])
+        action_details.set({})
+        action_errors.set({})
         await chat.clear_messages()
         await chat.append_message({"role": "assistant", "content": "New session started. Type a message to begin."})
 
@@ -383,12 +708,16 @@ def server(input, output, session):
             return
         session_id.set(sid)
         workflow_state.set({})
+        action_proposals.set([])
+        action_details.set({})
+        action_errors.set({})
         await chat.clear_messages()
         await chat.append_message({
             "role": "assistant",
             "content": f"Restored session `{sid[:12]}...`. Send a message to continue the conversation.",
         })
         await _refresh_workflow_state()
+        await _refresh_action_proposals()
 
     # --- Test scenario handlers ---
 
@@ -399,6 +728,9 @@ def server(input, output, session):
         # Start fresh session
         session_id.set(None)
         workflow_state.set({})
+        action_proposals.set([])
+        action_details.set({})
+        action_errors.set({})
         await chat.clear_messages()
         # Send the scenario message
         await chat.append_message({"role": "assistant", "content": f"**Test scenario:** {scenario['label']}\n\n*{scenario['description']}*\n\nCustomer: {cid}"})
@@ -412,6 +744,8 @@ def server(input, output, session):
             data = await api.chat(payload)
             session_id.set(data["session_id"])
             await chat.append_message({"role": "assistant", "content": data["response"]})
+            _remember_proposals(data)
+            await _refresh_action_proposals()
             await _refresh_workflow_state()
         except httpx.HTTPStatusError as e:
             await chat.append_message({"role": "assistant", "content": f"Error: {e.response.status_code} — {e.response.text}"})

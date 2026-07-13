@@ -170,10 +170,12 @@ development when recording or transcription consent is absent.
 
 ## Consequential action integration
 
-The model may propose an action, but only `ConsequentialActionService` creates an
-authorized command. `POST /api/v1/core/actions` uses a discriminated `payload`
-union. Swagger shows each supported action schema:
+The model may call a proposal-only tool, but only trusted host code creates a
+durable proposal and only host confirmation invokes `ConsequentialActionService`.
+Chat exposes structured proposals; clients must not parse model prose. The closed
+typed catalog includes:
 
+- refund;
 - store credit;
 - case status update;
 - EFT dispute filing;
@@ -184,7 +186,9 @@ union. Swagger shows each supported action schema:
 - SAR submission by secure narrative reference;
 - alert closure.
 
-Refund keeps its specialized authoritative endpoint at `/api/v1/core/refunds`.
+`POST /api/v1/core/actions` accepts all typed payloads. `/api/v1/core/refunds`
+remains a compatibility wrapper. Conversation clients normally use the proposal,
+confirm/cancel, and status endpoints documented in [Action Bridge](action-bridge.md).
 
 ### Authoritative resource contract
 
@@ -211,6 +215,37 @@ async def reconcile(command: ActionCommand, prior: dict | None) -> ConnectorOutc
 `dispatch()` receives a stable idempotency key. If the provider response is
 ambiguous, return `unknown`. `reconcile()` queries provider state by business key or
 provider reference; it must not redispatch.
+
+### Per-action connector registry
+
+`ACTION_REGISTRY_PATH` binds closed actions to development SQLite, built-in
+REST/OpenAPI, or trusted Python connectors. WebSocket binding models are
+contract-only in v3.2 and fail startup when enabled without a custom runtime.
+
+REST bindings require an allowed host, idempotency header, timeout, explicit
+status mappings, pinned local OpenAPI digest/operation, safe response fields, and
+reconciliation for asynchronous acceptance. Production requires HTTPS and rejects
+inline secrets, unknown actions, and SQLite bindings. OpenAPI defines wire shape;
+engine code still owns permission, policy, consent, approval, and fact authority.
+
+A registry may intentionally bind only part of the closed catalog. The catalog API
+marks unbound entries `available: false`, and proposal preparation rejects them;
+there is no silent fallback to a default connector once a registry is active.
+
+The provider bundle still supplies channel and resource adapters. The registry can
+override per-action connector selection but does not replace the bundle in provider
+mode. See [Action Bridge](action-bridge.md) for the complete YAML/JSON schema.
+
+### MCP
+
+Streamable HTTP at `/mcp` exposes proposal-only `actions_prepare` and read-only
+`actions_get_status`, catalog/proposal resources, and safety/workflow prompts. It
+uses the same authenticated `ActionBridge` and rejects actor, customer, policy,
+evidence, idempotency, provider URL, credential, and binding fields in tool
+arguments. Staff hosts bind the serviced customer with
+`X-Workflow-Customer-ID`; optional procedure/conversation/message headers provide
+correlation. MCP has no confirm or execution tool; confirmation remains a trusted
+REST/UI host operation.
 
 The SQLite sandbox supports `success`, `rejected`, `timeout_before_commit`, and
 `timeout_after_commit` through

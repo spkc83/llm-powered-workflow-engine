@@ -7,8 +7,6 @@ from workflow_engine.core.kernel import (
     ActionCommand,
     ActionStatus,
     CaseKernel,
-    FactAuthority,
-    FactProposal,
     OutboxStatus,
     SQLiteCoreStore,
     HandoffConflict,
@@ -162,35 +160,23 @@ async def test_action_authorization_and_outbox_are_atomic_and_worker_is_restart_
     store = SQLiteCoreStore(tmp_path / "core.db")
     await store.initialize()
     kernel = CaseKernel(store)
-    case = await kernel.create_case("CASE-OUT", "CUST-1", "cs_refund", "1")
-    case = await kernel.commit_fact(
-        case.case_id,
-        FactProposal(
-            name="order_id",
-            value="ORD-1",
-            authority=FactAuthority.VERIFIED,
-            source="orders",
-            evidence_ref="orders:ORD-1:v1",
-        ),
-        case.version,
-    )
+    case = await kernel.create_case("CASE-OUT", "CUST-1", "cs_note", "1")
     action = await kernel.authorize_action(
         ActionCommand(
-            action="issue_refund",
+            action="add_case_note",
             case_id=case.case_id,
-            policy_package_id="refund@1:NAM",
+            policy_package_id="note@1:NAM",
             actor_id="rep-1",
-            idempotency_key="refund:ORD-1",
-            parameters={"order_id": "ORD-1"},
-            parameter_fact_refs={"order_id": "order_id"},
-            required_fact_authority={"order_id": FactAuthority.VERIFIED},
-            consent_evidence_ref="message:yes",
+            idempotency_key="note:CASE-OUT:1",
+            parameters={"note": "customer confirmed the next step"},
+            parameter_fact_refs={},
+            required_fact_authority={},
         ),
         case.version,
     )
     pending = await store.list_outbox(OutboxStatus.PENDING)
     connector = Connector()
-    worker = ActionDeliveryWorker(store, ActionGateway(kernel, {"issue_refund": connector}))
+    worker = ActionDeliveryWorker(store, ActionGateway(kernel, {"add_case_note": connector}))
 
     first = await worker.run_once()
     second = await worker.run_once()
@@ -226,29 +212,17 @@ async def test_stale_dispatched_action_reconciles_after_process_crash_without_re
     store = SQLiteCoreStore(tmp_path / "crash.db")
     await store.initialize()
     kernel = CaseKernel(store)
-    case = await kernel.create_case("CASE-CRASH", "CUST-1", "cs_refund", "1")
-    case = await kernel.commit_fact(
-        case.case_id,
-        FactProposal(
-            name="order_id",
-            value="ORD-CRASH",
-            authority=FactAuthority.VERIFIED,
-            source="orders",
-            evidence_ref="orders:ORD-CRASH",
-        ),
-        case.version,
-    )
+    case = await kernel.create_case("CASE-CRASH", "CUST-1", "cs_note", "1")
     action = await kernel.authorize_action(
         ActionCommand(
-            action="issue_refund",
+            action="add_case_note",
             case_id=case.case_id,
-            policy_package_id="refund@1:NAM",
+            policy_package_id="note@1:NAM",
             actor_id="rep-1",
-            idempotency_key="refund:ORD-CRASH",
-            parameters={"order_id": "ORD-CRASH"},
-            parameter_fact_refs={"order_id": "order_id"},
-            required_fact_authority={"order_id": FactAuthority.VERIFIED},
-            consent_evidence_ref="message:yes",
+            idempotency_key="note:CASE-CRASH:1",
+            parameters={"note": "stale dispatch reconciliation"},
+            parameter_fact_refs={},
+            required_fact_authority={},
         ),
         case.version,
     )
@@ -256,7 +230,7 @@ async def test_stale_dispatched_action_reconciles_after_process_crash_without_re
     assert did_claim and claimed.status is ActionStatus.DISPATCHED
 
     connector = Connector()
-    gateway = ActionGateway(kernel, {"issue_refund": connector})
+    gateway = ActionGateway(kernel, {"add_case_note": connector})
     run = await ReconciliationWorker(
         store, gateway, dispatch_stale_seconds=0
     ).run_once()
@@ -400,7 +374,11 @@ async def test_chat_and_ivr_use_the_same_turn_pipeline_and_response_contract(tmp
 
     async def processor(context, text):
         calls.append((context.channel, text))
-        return GeneratedTurn(text=f"safe:{text}", risk=RiskLevel.CONSEQUENTIAL)
+        return GeneratedTurn(
+            text=f"safe:{text}",
+            risk=RiskLevel.CONSEQUENTIAL,
+            action_proposals=[{"proposal_id": f"P-{context.message_id}"}],
+        )
 
     store = SQLiteCoreStore(tmp_path / "turns.db")
     await store.initialize()
@@ -437,6 +415,7 @@ async def test_chat_and_ivr_use_the_same_turn_pipeline_and_response_contract(tmp
 
     assert calls == [(ChannelKind.CHAT, "hello"), (ChannelKind.IVR, "hello")]
     assert chat.may_stream is False
+    assert chat.action_proposals == [{"proposal_id": "P-M-1"}]
     assert ivr.requires_readback is True
 
 
@@ -449,7 +428,7 @@ async def test_typed_action_service_rejects_caller_data_that_differs_from_upstre
     await connector.put_resource(
         "order",
         "ORD-9",
-        {"order_id": "ORD-9", "customer_id": "CUST-9", "amount": 80.0},
+        {"order_id": "ORD-9", "customer_id": "CUST-9", "amount": 80.0, "currency": "USD"},
     )
     signer = PolicySigner(b"action-policy-key")
     active = signer.activate(
@@ -495,6 +474,18 @@ async def test_typed_action_service_rejects_caller_data_that_differs_from_upstre
     with pytest.raises(ValueError, match="does not match"):
         await service.submit(request, actor_id="rep-1")
 
+    wrong_customer = request.model_copy(
+        update={
+            "customer_id": "CUST-OTHER",
+            "idempotency_key": "store-credit:ORD-9:other-customer",
+            "payload": request.payload.model_copy(
+                update={"customer_id": "CUST-9", "amount": 80.0}
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="serviced customer"):
+        await service.submit(wrong_customer, actor_id="rep-1")
+
     accepted = request.model_copy(
         update={"payload": request.payload.model_copy(update={"amount": 80.0})}
     )
@@ -539,7 +530,7 @@ def test_every_consequential_catalog_operation_has_a_closed_gateway_specificatio
         name for name, control in TOOL_CATALOG.items() if control.consequential
     }
     assert set(ACTION_SPECIFICATIONS) == catalog_actions
-    assert set(ACTION_PERMISSIONS) == catalog_actions - {"issue_refund"}
+    assert set(ACTION_PERMISSIONS) == catalog_actions
 
 
 def test_policy_key_rotation_can_verify_history_without_using_old_key_for_signing():

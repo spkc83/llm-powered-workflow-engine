@@ -2,7 +2,7 @@
 
 For questions, defects, and feature requests, open a GitHub issue with version,
 environment, channel/provider mode, procedure, sanitized reproduction,
-expected/actual behavior, and correlation/message/case/action IDs. Swagger schemas
+expected/actual behavior, and correlation/message/case/proposal/action IDs. Swagger schemas
 are at `/docs`; provider implementation guidance is in
 `docs/integration-guide.md`.
 
