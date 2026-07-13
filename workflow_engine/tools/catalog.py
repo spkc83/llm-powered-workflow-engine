@@ -48,6 +48,8 @@ class ToolControl:
     authorization_mode: AuthorizationMode
     idempotency_mode: IdempotencyMode
     production_model_enabled: bool
+    proposal_only: bool = False
+    self_service_allowed: bool = False
 
 
 def _read(
@@ -70,6 +72,8 @@ def _read(
         ),
         idempotency_mode=IdempotencyMode.NOT_APPLICABLE,
         production_model_enabled=True,
+        proposal_only=False,
+        self_service_allowed=False,
     )
 
 
@@ -78,6 +82,8 @@ def _action(
     owner: ToolOwner,
     permission: Permission,
     risk_tier: RiskTier,
+    *,
+    self_service: bool = False,
 ) -> ToolControl:
     return ToolControl(
         name=name,
@@ -87,9 +93,12 @@ def _action(
         required_permission=permission,
         authorization_mode=AuthorizationMode.ACTION_GATEWAY_REQUIRED,
         idempotency_mode=IdempotencyMode.ACTION_GATEWAY,
-        # Models never execute these operations directly. The v3 REST action
-        # service creates a typed command and the independent gateway dispatches it.
-        production_model_enabled=False,
+        # The registered model functions are proposal-only wrappers.  They place
+        # untrusted intents in session state; host confirmation and the typed
+        # gateway remain mandatory before any effect.
+        production_model_enabled=True,
+        proposal_only=True,
+        self_service_allowed=self_service,
     )
 
 
@@ -118,7 +127,13 @@ _ENTRIES = (
         Permission.DEVICE_READ,
         risk_tier=RiskTier.MEDIUM,
     ),
-    _action("issue_refund", ToolOwner.CUSTOMER_SERVICE, Permission.REFUND_WRITE, RiskTier.HIGH),
+    _action(
+        "issue_refund",
+        ToolOwner.CUSTOMER_SERVICE,
+        Permission.REFUND_WRITE,
+        RiskTier.HIGH,
+        self_service=True,
+    ),
     _action("issue_store_credit", ToolOwner.CUSTOMER_SERVICE, Permission.REFUND_WRITE, RiskTier.HIGH),
     _action("update_case_status", ToolOwner.CUSTOMER_SERVICE, Permission.CASE_WRITE, RiskTier.MEDIUM),
     _action("file_eft_dispute", ToolOwner.CUSTOMER_SERVICE, Permission.CASE_WRITE, RiskTier.REGULATED),
@@ -159,12 +174,18 @@ def select_model_tools(
     """Return classified tools allowed for the current environment.
 
     Unknown tools raise instead of being silently exposed.  In production,
-    consequential tools remain unavailable until the action gateway required by
-    the catalog exists and their entries are deliberately changed.
+    consequential entries are exposed only when their registered functions are
+    the proposal-only wrappers required by this catalog.
     """
     selected: list[Callable] = []
     for name in sorted(tool_map):
         control = TOOL_CATALOG[name]
+        if control.proposal_only:
+            module = getattr(tool_map[name], "__module__", "")
+            if module != "workflow_engine.tools.action_proposals":
+                raise ValueError(
+                    f"Consequential model tool {name} is not a proposal-only wrapper"
+                )
         if not production or control.production_model_enabled:
             selected.append(tool_map[name])
     return selected

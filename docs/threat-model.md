@@ -23,7 +23,11 @@ payloads, and mutable client fields are not trusted.
 
 | Threat | v3 control |
 |---|---|
-| Prompt injection invokes a write | Consequential model tools remain frozen; typed action service/gateway is independent. |
+| Prompt injection invokes a write | Consequential model tools queue intent only; host confirmation and typed gateway are independent. |
+| Model confirms its proposal | No model confirmation tool; server derives actor/customer/evidence at host API. |
+| Model chooses provider URL/binding | Registry is deployment-owned; gateway stamps active binding and ignores inbound selection. |
+| Registry SSRF/secret leak | Closed catalog, allowlisted host, HTTPS, no redirects, secret references, pinned OpenAPI, safe response fields. |
+| Stale proposal executes | Confirmation rechecks ownership, expiry, resource version, binding, consent, and approval. |
 | Client calls action with invented amount | Authoritative resource adapter reload and exact fact/parameter match. |
 | Duplicate/resumed provider effect | Unique business idempotency, atomic action/outbox insertion, provider key reuse. |
 | Timeout after provider commit | `unknown` state and query-only reconciliation; never blind redispatch. |
@@ -48,8 +52,10 @@ payloads, and mutable client fields are not trusted.
   conformance testing.
 - SQLite is the reference adapter; multi-instance production stores need their own
   concurrency conformance evidence.
-- Legacy dev action functions remain non-production surfaces; production model
-  exposure stays frozen.
+- Shiny host evidence is not a cryptographic customer signature or step-up ceremony.
+- MCP is an authenticated proposal/status façade only. Host-header delegation and
+  MCP client security remain deployment risks; no confirm/execute tool is exposed.
+- No generic WebSocket provider runtime ships in v3.2.
 
 ## Production gate
 

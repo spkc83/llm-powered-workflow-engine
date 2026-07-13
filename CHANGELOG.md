@@ -2,15 +2,49 @@
 
 ## Unreleased
 
+No unreleased changes documented.
+
+## [3.2.0] - 2026-07-13
+
+### Added
+
+- Trusted conversation-to-action bridge with durable proposals, authoritative
+  previews, expiry, actor/customer ownership, and atomic confirmation/cancellation.
+- Structured action proposals in chat responses and Shiny confirmation cards with
+  confirm, cancel, authoritative status, outcome, and event-history views.
+- Proposal-only ADK tools for every closed-catalog consequential action; model calls
+  cannot directly perform business effects.
+- Action catalog, proposal lifecycle, and action-status REST/Swagger endpoints.
+- Startup-validated per-action connector registry supporting SQLite demo bindings,
+  pinned REST/OpenAPI bindings, and trusted Python connector factories.
+- Declarative WebSocket provider binding contract with explicit validation-only
+  status; no generic WebSocket dispatch runtime is claimed.
+- Read-only reference-data resource adapters for versioned demo authority checks.
+- Authenticated stateless Streamable HTTP MCP façade with proposal/status tools,
+  catalog/proposal resources, and safety/workflow prompts; no execution authority.
+
+### Changed
+
+- Refunds now use the common typed consequential-action payload and gateway path.
+- Development demonstrations use the same proposal/confirmation/gateway controls as
+  provider deployments instead of legacy direct-write model tools.
+- Authorized commands stamp immutable connector binding and contract versions.
+- Version advanced to 3.2.0.
+
+### Security
+
+- Confirmation is host-only and derives actor/customer/evidence from trusted server
+  context; model inputs cannot select provider URLs, credentials, policy, or binding.
+- Confirmation fails on ownership mismatch, expiry, resource-version change,
+  connector-binding change, missing consent/approval, or conflicting lifecycle state.
+- REST registry rejects unknown actions, inline secrets, disallowed hosts, unpinned
+  OpenAPI drift, incomplete asynchronous reconciliation, and insecure production URLs.
+
 ### Documentation
 
-- Added a full application architecture manual with system context, runtime
-  topology, trust/data ownership, chat, IVR, action, policy, handoff, storage,
-  deployment, and failure-handling diagrams.
-- Reworked the README and expanded current-state, configuration, UI, testing,
-  core-engine, integration, and operations guides against the v3.1 implementation.
-- Made production, sandbox, deployment-supplied, and out-of-scope boundaries
-  explicit throughout the documentation.
+- Rewrote architecture, action bridge, API, integration, UI, configuration,
+  operations, testing, threat-model, current-state, and roadmap documentation for
+  the actual v3.2 implementation and its remaining limitations.
 
 ## [3.1.0] - 2026-07-12
 

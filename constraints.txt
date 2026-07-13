@@ -9,6 +9,7 @@ pydantic-settings==2.10.1
 PyJWT==2.13.0
 PyYAML==6.0.2
 httpx==0.28.1
+mcp==1.27.0
 shiny==1.5.1
 z3-solver==4.16.0.0
 sympy==1.14.0

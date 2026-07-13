@@ -48,3 +48,17 @@ correction/supersession, and deletion rules per evidence class.
 
 The local audit hash chain detects modification but must be combined with immutable
 backup or external anchoring for stronger tamper resistance.
+
+## Action proposal governance
+
+A proposal is not approval or execution. It binds actor, customer, procedure,
+active policy, authoritative resource version, connector contract, and expiry for
+review. Host confirmation creates evidence and submits the typed action, but the
+default Shiny button is not a cryptographic signature or step-up authentication.
+Risk owners must define which actions require stronger confirmation, dual control,
+approved disclosure text, and evidence retention.
+
+Action registry/OpenAPI changes are governed deployment artifacts. Review binding
+IDs/versions, allowed hosts, secret references, mappings, outcome semantics, and
+reconciliation before activation. Keep historical connector contracts available
+for queued and retained actions.

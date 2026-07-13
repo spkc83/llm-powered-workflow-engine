@@ -1,6 +1,6 @@
 # User and Service-Operator Guide
 
-## What v3 does
+## What v3.2 does
 
 The application assists customers and authorized staff through chat and IVR. The
 model interprets requests and drafts responses; deterministic code controls money,
@@ -12,7 +12,10 @@ account, regulatory, fraud, and handoff state.
 2. Send a message with a stable provider message ID; reuse it on retry.
 3. Continue using the returned conversation/session ID.
 4. Review structured action details and consent/approval prompts.
-5. Treat only `succeeded` or `reconciled` as completed.
+5. If an action card appears, review the authoritative preview and expiry.
+6. Confirm or cancel using the host control; the assistant cannot confirm for you.
+7. Treat proposal `confirmed` as submitted, not completed. Treat only action
+   `succeeded` or `reconciled` as completed.
 
 A repeated ID is suppressed. Out-of-order provider messages wait in quarantine.
 Staff and customer identities remain separate; a conversation cannot be reused for
@@ -42,8 +45,9 @@ reassignment, callback/bot re-entry, or another approved option.
 
 ## Development sandbox
 
-In development, Swagger at `/docs` can emulate upstream resources and outcomes.
-Every sandbox result says `simulated: true`; it is not evidence of a real refund,
+In development, Shiny demonstrates chat → proposal → confirmation → typed gateway
+→ local SQLite effect and action history. Swagger can seed resources and failure
+scenarios. These are local effects, not evidence of a real bank/provider refund,
 credit, filing, restriction, delivery, or human connection.
 
 ## Corrections and support

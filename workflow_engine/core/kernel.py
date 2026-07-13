@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import aiosqlite
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from workflow_engine.core.action_specs import ACTION_SPECIFICATIONS
 
@@ -56,6 +56,13 @@ class ActionStatus(str, Enum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     RECONCILED = "reconciled"
+
+
+class ActionProposalStatus(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
 
 
 class OutboxStatus(str, Enum):
@@ -102,6 +109,9 @@ class ActionCommand(BaseModel):
     consent_evidence_ref: str | None = None
     approval_evidence_ref: str | None = None
     policy_activation_signature: str | None = None
+    connector_binding_id: str | None = None
+    connector_binding_version: str | None = None
+    contract_version: str | None = None
 
 
 class ActionRecord(BaseModel):
@@ -111,6 +121,41 @@ class ActionRecord(BaseModel):
     outcome: dict[str, Any] | None = None
     created_at: str
     updated_at: str
+
+
+class ActionProposal(BaseModel):
+    proposal_id: str
+    action: str
+    payload: dict[str, Any]
+    case_id: str
+    customer_id: str
+    actor_id: str
+    procedure_id: str
+    procedure_version: str
+    policy_package_id: str
+    idempotency_key: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    resource_version: int | None = None
+    conversation_id: str | None = None
+    message_id: str | None = None
+    connector_binding_id: str | None = None
+    connector_binding_version: str | None = None
+    contract_version: str | None = None
+    preview: dict[str, Any] = Field(default_factory=dict)
+    status: ActionProposalStatus
+    confirmation_evidence_ref: str | None = None
+    action_id: str | None = None
+    created_at: str
+    expires_at: str
+    updated_at: str
+    confirmed_at: str | None = None
+    cancelled_at: str | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def safe_preview(self) -> dict[str, Any]:
+        return self.preview
 
 
 class OutboxRecord(BaseModel):
@@ -142,6 +187,25 @@ class CoreStore(Protocol):
     async def update_action(self, action_id: str, status: ActionStatus, outcome: dict | None) -> ActionRecord: ...
     async def transition_action(self, action_id: str, expected: ActionStatus, status: ActionStatus, outcome: dict | None) -> ActionRecord: ...
     async def claim_action(self, action_id: str) -> tuple[ActionRecord, bool]: ...
+    async def create_action_proposal(self, record: ActionProposal) -> ActionProposal: ...
+    async def get_action_proposal(self, proposal_id: str) -> ActionProposal | None: ...
+    async def list_action_proposals(
+        self,
+        *,
+        customer_id: str | None = None,
+        conversation_id: str | None = None,
+        status: ActionProposalStatus | None = None,
+        limit: int = 100,
+    ) -> list[ActionProposal]: ...
+    async def transition_action_proposal(
+        self,
+        proposal_id: str,
+        expected: ActionProposalStatus,
+        status: ActionProposalStatus,
+        *,
+        confirmation_evidence_ref: str | None = None,
+        action_id: str | None = None,
+    ) -> ActionProposal: ...
     async def enqueue_outbox(self, topic: str, aggregate_id: str, payload: dict[str, Any]) -> OutboxRecord: ...
     async def claim_outbox(self, owner: str, lease_seconds: int, limit: int = 10) -> list[OutboxRecord]: ...
     async def complete_outbox(self, outbox_id: str) -> OutboxRecord: ...
@@ -194,6 +258,40 @@ class SQLiteCoreStore:
                     status TEXT NOT NULL, details_json TEXT, recorded_at TEXT NOT NULL,
                     FOREIGN KEY(action_id) REFERENCES action_attempts(action_id)
                 );
+                CREATE TABLE IF NOT EXISTS action_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    action TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    procedure_id TEXT NOT NULL,
+                    procedure_version TEXT NOT NULL,
+                    policy_package_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    resource_type TEXT,
+                    resource_id TEXT,
+                    resource_version INTEGER,
+                    conversation_id TEXT,
+                    message_id TEXT,
+                    connector_binding_id TEXT,
+                    connector_binding_version TEXT,
+                    contract_version TEXT,
+                    preview_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    confirmation_evidence_ref TEXT,
+                    action_id TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    cancelled_at TEXT,
+                    FOREIGN KEY(action_id) REFERENCES action_attempts(action_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_action_proposals_customer
+                    ON action_proposals(customer_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_action_proposals_conversation
+                    ON action_proposals(conversation_id, created_at);
                 CREATE TABLE IF NOT EXISTS inbox_messages (
                     message_id TEXT PRIMARY KEY, envelope_json TEXT NOT NULL, received_at TEXT NOT NULL
                 );
@@ -512,6 +610,164 @@ class SQLiteCoreStore:
             status=ActionStatus(row["status"]),
             outcome=json.loads(row["outcome_json"]) if row["outcome_json"] else None,
             created_at=row["created_at"], updated_at=row["updated_at"],
+        )
+
+    async def create_action_proposal(self, record: ActionProposal) -> ActionProposal:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """INSERT INTO action_proposals
+                (proposal_id,action,payload_json,case_id,customer_id,actor_id,
+                 procedure_id,procedure_version,policy_package_id,idempotency_key,
+                 resource_type,resource_id,resource_version,conversation_id,message_id,
+                 connector_binding_id,connector_binding_version,contract_version,
+                 preview_json,status,confirmation_evidence_ref,action_id,created_at,
+                 expires_at,updated_at,confirmed_at,cancelled_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record.proposal_id,
+                    record.action,
+                    json.dumps(record.payload),
+                    record.case_id,
+                    record.customer_id,
+                    record.actor_id,
+                    record.procedure_id,
+                    record.procedure_version,
+                    record.policy_package_id,
+                    record.idempotency_key,
+                    record.resource_type,
+                    record.resource_id,
+                    record.resource_version,
+                    record.conversation_id,
+                    record.message_id,
+                    record.connector_binding_id,
+                    record.connector_binding_version,
+                    record.contract_version,
+                    json.dumps(record.preview),
+                    record.status.value,
+                    record.confirmation_evidence_ref,
+                    record.action_id,
+                    record.created_at,
+                    record.expires_at,
+                    record.updated_at,
+                    record.confirmed_at,
+                    record.cancelled_at,
+                ),
+            )
+            await db.commit()
+        return record
+
+    async def get_action_proposal(self, proposal_id: str) -> ActionProposal | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM action_proposals WHERE proposal_id=?", (proposal_id,)
+            )).fetchone()
+        return self._proposal_from_row(dict(row)) if row else None
+
+    async def list_action_proposals(
+        self,
+        *,
+        customer_id: str | None = None,
+        conversation_id: str | None = None,
+        status: ActionProposalStatus | None = None,
+        limit: int = 100,
+    ) -> list[ActionProposal]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if customer_id is not None:
+            clauses.append("customer_id=?")
+            params.append(customer_id)
+        if conversation_id is not None:
+            clauses.append("conversation_id=?")
+            params.append(conversation_id)
+        if status is not None:
+            clauses.append("status=?")
+            params.append(status.value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute(
+                f"SELECT * FROM action_proposals {where} ORDER BY created_at DESC LIMIT ?",
+                params,
+            )).fetchall()
+        return [self._proposal_from_row(dict(row)) for row in rows]
+
+    async def transition_action_proposal(
+        self,
+        proposal_id: str,
+        expected: ActionProposalStatus,
+        status: ActionProposalStatus,
+        *,
+        confirmation_evidence_ref: str | None = None,
+        action_id: str | None = None,
+    ) -> ActionProposal:
+        now = _now()
+        confirmed_at = now if status is ActionProposalStatus.CONFIRMED else None
+        cancelled_at = now if status is ActionProposalStatus.CANCELLED else None
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """UPDATE action_proposals
+                SET status=?, confirmation_evidence_ref=COALESCE(?, confirmation_evidence_ref),
+                    action_id=COALESCE(?, action_id), updated_at=?,
+                    confirmed_at=COALESCE(?, confirmed_at),
+                    cancelled_at=COALESCE(?, cancelled_at)
+                WHERE proposal_id=? AND status=?""",
+                (
+                    status.value,
+                    confirmation_evidence_ref,
+                    action_id,
+                    now,
+                    confirmed_at,
+                    cancelled_at,
+                    proposal_id,
+                    expected.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise ActionConflict(
+                    f"Action proposal {proposal_id} transition conflict from {expected.value}"
+                )
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute(
+                "SELECT * FROM action_proposals WHERE proposal_id=?", (proposal_id,)
+            )).fetchone()
+        assert row is not None
+        return self._proposal_from_row(dict(row))
+
+    @staticmethod
+    def _proposal_from_row(row: dict[str, Any]) -> ActionProposal:
+        return ActionProposal(
+            proposal_id=row["proposal_id"],
+            action=row["action"],
+            payload=json.loads(row["payload_json"]),
+            case_id=row["case_id"],
+            customer_id=row["customer_id"],
+            actor_id=row["actor_id"],
+            procedure_id=row["procedure_id"],
+            procedure_version=row["procedure_version"],
+            policy_package_id=row["policy_package_id"],
+            idempotency_key=row["idempotency_key"],
+            resource_type=row["resource_type"],
+            resource_id=row["resource_id"],
+            resource_version=row["resource_version"],
+            conversation_id=row["conversation_id"],
+            message_id=row["message_id"],
+            connector_binding_id=row["connector_binding_id"],
+            connector_binding_version=row["connector_binding_version"],
+            contract_version=row["contract_version"],
+            preview=json.loads(row["preview_json"]),
+            status=ActionProposalStatus(row["status"]),
+            confirmation_evidence_ref=row["confirmation_evidence_ref"],
+            action_id=row["action_id"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            updated_at=row["updated_at"],
+            confirmed_at=row["confirmed_at"],
+            cancelled_at=row["cancelled_at"],
         )
 
     async def accept_message(self, envelope: dict[str, Any]) -> bool:

@@ -1,6 +1,7 @@
 """Independently enforced action dispatch and reconciliation boundary."""
 
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel
 
@@ -30,6 +31,26 @@ class ActionConnector(Protocol):
     async def reconcile(self, command, prior: dict[str, Any] | None) -> ConnectorOutcome: ...
 
 
+@dataclass(frozen=True)
+class ResolvedActionConnector:
+    action_name: str
+    binding_id: str
+    binding_version: str
+    contract_version: str
+    connector: ActionConnector
+
+
+class ActionConnectorResolver(Protocol):
+    def resolve(
+        self,
+        action_name: str,
+        *,
+        binding_id: str | None = None,
+        binding_version: str | None = None,
+        contract_version: str | None = None,
+    ) -> ResolvedActionConnector: ...
+
+
 class PolicyResolver(Protocol):
     async def require_active(self, package_id: str): ...
     async def require_authorization_snapshot(
@@ -41,7 +62,7 @@ class ActionGateway:
     def __init__(
         self,
         kernel: CaseKernel,
-        connectors: dict[str, ActionConnector],
+        connectors: Mapping[str, ActionConnector] | ActionConnectorResolver,
         policy_registry: PolicyRegistry | None = None,
         policy_resolver: PolicyResolver | None = None,
     ):
@@ -50,9 +71,46 @@ class ActionGateway:
         self.policy_registry = policy_registry
         self.policy_resolver = policy_resolver
 
+    def _resolve_connector(self, command, *, use_pinned_binding: bool = True) -> ResolvedActionConnector:
+        resolver = getattr(self.connectors, "resolve", None)
+        if callable(resolver):
+            return resolver(
+                command.action,
+                binding_id=(getattr(command, "connector_binding_id", None) if use_pinned_binding else None),
+                binding_version=(
+                    getattr(command, "connector_binding_version", None)
+                    if use_pinned_binding
+                    else None
+                ),
+                contract_version=(
+                    getattr(command, "contract_version", None) if use_pinned_binding else None
+                ),
+            )
+        connector = self.connectors.get(command.action)  # type: ignore[union-attr]
+        if connector is None:
+            raise ValueError(f"Unknown action connector: {command.action}")
+        return ResolvedActionConnector(
+            action_name=command.action,
+            binding_id="legacy",
+            binding_version="1",
+            contract_version="1",
+            connector=connector,
+        )
+
     async def authorize(
         self, command, expected_version: int
     ) -> ActionRecord:
+        # Initial authorization always selects the server's active binding. Any
+        # binding fields present in an inbound command are ignored and replaced.
+        resolved = self._resolve_connector(command, use_pinned_binding=False)
+        update = {}
+        if "connector_binding_id" in command.__class__.model_fields:
+            update = {
+                "connector_binding_id": resolved.binding_id,
+                "connector_binding_version": resolved.binding_version,
+                "contract_version": resolved.contract_version,
+            }
+            command = command.model_copy(update=update)
         if self.policy_registry is None and self.policy_resolver is None:
             return await self.kernel.authorize_action(command, expected_version)
         if self.policy_resolver is not None:
@@ -110,9 +168,7 @@ class ActionGateway:
                 raise ValueError(
                     f"Policy package {package.package_id} does not allow {action.command.action}"
                 )
-        connector = self.connectors.get(action.command.action)
-        if connector is None:
-            raise ValueError(f"Unknown action connector: {action.command.action}")
+        connector = self._resolve_connector(action.command).connector
         claimed_action, claimed = await self.kernel.store.claim_action(action.action_id)
         if not claimed:
             return claimed_action
@@ -136,7 +192,7 @@ class ActionGateway:
             )
         if action.status is not ActionStatus.UNKNOWN:
             return action
-        connector = self.connectors[action.command.action]
+        connector = self._resolve_connector(action.command).connector
         outcome = await connector.reconcile(action.command, action.outcome)
         if outcome.status is ActionStatus.SUCCEEDED:
             return await self.kernel.record_outcome(

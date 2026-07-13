@@ -5,7 +5,8 @@
 REST chat, WebSocket chat, and canonical IVR turns normalize to
 `MessageEnvelope` and call `ConversationService.process_turn()`. The shared path
 owns provider-scoped deduplication, sequence quarantine, actor/customer context,
-ADK generation, full response steering, and risk-based response contracts.
+ADK generation, full response steering, risk-based response contracts, and optional
+structured action proposal views.
 
 ## Envelope
 
@@ -29,6 +30,12 @@ consequential/regulated responses instead of leaking unsafe token chunks.
 
 When authentication is enabled, WebSocket upgrade requires a bearer token. Session
 ownership binds actor and customer; a session cannot cross that boundary.
+
+Consequential tools in chat queue proposal intent only. Trusted post-processing
+creates a durable proposal and returns it as structured data. Confirmation is a
+separate authenticated host call; neither REST nor WebSocket chat text executes an
+effect. WebSocket customer chat is unrelated to the contract-only WebSocket action
+provider binding.
 
 ## IVR
 
@@ -55,3 +62,4 @@ acknowledgement never becomes a false “connected” claim.
 
 See [Upstream Integration Guide](integration-guide.md) for payloads, callbacks,
 conformance cases, and operational enablement.
+See [Conversational Action Bridge](action-bridge.md) for confirmation and action status.
