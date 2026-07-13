@@ -5,6 +5,9 @@ This guide is the implementation contract for chat, telephony, speech-to-text
 engine is vendor-neutral. Built-in adapters emulate these contracts only in
 `ENVIRONMENT=dev`.
 
+Read [Application Architecture](architecture.md) for the system boundary and full
+IVR/action/handoff sequences before implementing a provider.
+
 ## Safety and deployment modes
 
 `UPSTREAM_MODE` has three values:
@@ -13,7 +16,7 @@ engine is vendor-neutral. Built-in adapters emulate these contracts only in
 |---|---|---|
 | unset in `dev` / `sandbox` | Local development and conformance tests | SQLite emulators are enabled and every outcome says `simulated: true`. |
 | unset outside `dev` / `disabled` | Fail-closed deployment | Upstream endpoints return `503`; actions do not leave the engine. |
-| `provider` | Reserved for a deployment that wires real adapter implementations | The reference `main.py` still fails closed until deployment code supplies providers. |
+| `provider` | Deployment-supplied real adapters | `main.py` loads and initializes a complete trusted `ProviderBundle`; startup fails if the factory is missing or invalid. |
 
 `UPSTREAM_MODE=sandbox` is rejected when `ENVIRONMENT=production`. Never route
 production traffic to the sandbox database.

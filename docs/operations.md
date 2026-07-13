@@ -1,5 +1,10 @@
 # Operations Runbook
 
+This describes the controls packaged in v3.1.0. Compose is a reference single-host
+topology, not a complete production platform. Providers, TLS/ingress, secret
+management, approved storage, backups, monitoring, and incident tooling remain
+deployment responsibilities.
+
 ## Startup gate
 
 1. Load environment and secret-manager values.
@@ -79,3 +84,13 @@ Canary by procedure, channel, provider, and risk. Advancement requires zero
 unauthorized effects, complete required evidence, no overdue unknown outcomes,
 provider conformance, acceptable latency/error budget, and truthful handoff/delivery
 status. Models/prompts can roll back independently from case/policy state.
+
+## Observability boundary
+
+`/api/v1/metrics` returns authenticated JSON, not Prometheus format. Structured
+logs and correlation IDs are implemented; Prometheus exporters, OpenTelemetry,
+dashboards, and alert routing are not packaged.
+
+At minimum, deployments should alert on old pending outbox entries, unknown action
+age, quarantine growth, worker inactivity, invalid active policy, audit-chain
+failure, provider error/latency, and readiness failure.

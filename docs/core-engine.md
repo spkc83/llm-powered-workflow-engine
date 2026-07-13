@@ -1,5 +1,10 @@
 # Core Engine Architecture
 
+This page defines the control-plane invariants. Read
+[Application Architecture](architecture.md) first for system context, runtime
+topology, data ownership, trust boundaries, and complete chat/IVR/action/handoff
+flows.
+
 ## Runtime topology
 
 ```text
@@ -121,3 +126,7 @@ middle-record deletion in the local chain; it is not a substitute for access
 control, external anchoring, immutable backup, or retention governance. Operational
 APIs expose action/outbox states, quarantine, receipts, reconciliation, active
 policies, adapter mode, and audit-chain verification.
+
+The metrics endpoint is an authenticated JSON snapshot, not Prometheus exposition.
+Prometheus, OpenTelemetry, dashboards, alert routing, external audit anchoring, and
+immutable retention are deployment responsibilities in v3.1.0.

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- Added a full application architecture manual with system context, runtime
+  topology, trust/data ownership, chat, IVR, action, policy, handoff, storage,
+  deployment, and failure-handling diagrams.
+- Reworked the README and expanded current-state, configuration, UI, testing,
+  core-engine, integration, and operations guides against the v3.1 implementation.
+- Made production, sandbox, deployment-supplied, and out-of-scope boundaries
+  explicit throughout the documentation.
+
 ## [3.1.0] - 2026-07-12
 
 ### Added

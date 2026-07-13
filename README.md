@@ -1,84 +1,138 @@
 # LLM-Powered Workflow Engine
 
-A deterministic workflow control plane with bounded Google ADK 2.4 conversation
-support. It is designed for customer-service, fraud, claims, and regulated financial
-workflows where a model may propose intent and wording but must never authorize or
-execute a consequential action.
+A provider-neutral workflow control plane for conversational customer service,
+fraud operations, and claims workflows.
 
-Version: 3.1.0 · License: [MIT](LICENSE) · Maintainer: [spkc83](CONTRIBUTORS.md)
+The application combines Google ADK/Gemini conversations with deterministic
+procedures, durable cases and facts, signed policy, typed consequential actions,
+transactional delivery, reconciliation, and audit evidence.
 
-## What this repository is
+> Current status: v3.1.0 is a substantive SQLite-backed engine and development
+> reference implementation. Real speech, telephony, chat, contact-center, action
+> providers, a production database adapter, and a production-grade UI are not
+> included. See [Current Implementation Status](docs/current-state.md).
 
-The application combines:
+## Why the application exists
 
-- a FastAPI REST/WebSocket service;
-- a durable case, fact, policy, action, inbox, outbox, and handoff kernel;
-- Google ADK agents for conversational routing and response generation;
-- deterministic procedure, policy, reasoning, and compliance checks;
-- provider-neutral STT, TTS, telephony, chat, action, and human-handoff ports;
-- truthful SQLite development emulators;
-- a Shiny development/operator console.
+LLMs are useful for understanding requests and producing natural responses, but
+they are not reliable authorization systems. This project separates conversation
+from control:
 
-It is not a complete bank, contact center, telephony platform, or production customer
-portal. Vendor adapters, credentials, TLS, secret management, external monitoring,
-legal approval, and deployment-specific data retention remain operator responsibilities.
+- the model proposes intent, facts, workflow direction, and wording;
+- deterministic code validates identity, jurisdiction, evidence, and procedure;
+- signed policy determines whether an action is allowed;
+- the action gateway creates an idempotent command and durable outbox entry;
+- a provider adapter performs or reconciles the external effect.
 
-See [Current Application State](docs/current-state.md) before evaluating features.
+The model and ADK session never become authoritative evidence for a refund, credit,
+account restriction, dispute, SAR, case change, or human transfer.
 
-## Architecture and authority
+## Architecture at a glance
 
-```text
-Chat REST / WebSocket / IVR transcript
-                  │
-       authentication + customer binding
-                  │
- provider-scoped inbox, dedupe, sequence quarantine
-                  │
-       shared ConversationService safety pipeline
-                  │
-      ADK proposal and response-wording layer
-                  │
- deterministic procedure / policy / jurisdiction checks
-                  │
- CoreStore: cases + verified facts + action authorization
-                  │  same transaction
-             durable outbox
-                  │
-       supervised ActionDeliveryWorker
-                  │
- sandbox emulator or deployment ProviderBundle
-                  │
-       outcome / unknown / reconciliation evidence
+```mermaid
+flowchart LR
+    Client[Chat / WebSocket / IVR client]
+    API[FastAPI + Auth/RBAC]
+    Conversation[Shared ConversationService]
+    ADK[Bounded ADK/Gemini layer]
+    Procedure[YAML procedure executor]
+    Core[Case, fact, policy and action core]
+    Outbox[(Transactional outbox)]
+    Worker[Delivery and reconciliation workers]
+    Provider[Provider adapter]
+
+    Client --> API
+    API --> Conversation
+    Conversation --> ADK
+    ADK --> Procedure
+    Conversation --> Core
+    Core --> Outbox
+    Outbox --> Worker
+    Worker --> Provider
 ```
 
-The model, prompt, tool arguments, channel payload, and ADK session are untrusted.
-Consequential operations require authenticated permissions, customer binding,
-authoritative resource reload, a signed active policy, verified facts, consent or
-approval where required, an idempotency key, and durable dispatch evidence.
+The full architecture, trust boundaries, transaction boundaries, state machines,
+and request sequences are explained in [Application Architecture](docs/architecture.md).
 
-Detailed component, lifecycle, and failure semantics are in
-[Core Engine Architecture](docs/core-engine.md) and the
-[Threat Model](docs/threat-model.md).
+## What works today
 
-## Capability summary
+### Implemented
 
-| Capability | Current state |
-|---|---|
-| Core case/fact/action engine | Implemented with SQLite reference store. |
-| Chat REST and WebSocket | Implemented through one guarded turn pipeline. |
-| IVR | Final-transcript processing and contracts implemented; no real call control. |
-| STT/TTS/telephony/chat delivery | Simulated locally; real adapters are deployment-supplied. |
-| Typed consequential actions | Implemented with durable outbox and reconciliation. |
-| Human handoff | Durable lifecycle plus local queue emulator; real platform adapter external. |
-| Policy governance | Durable draft/approve/activate/retire and key rotation. |
-| Database portability | Ports/factories implemented; only SQLite ships. |
-| UI | Development/operator Shiny console, not customer production UI. |
-| Observability | Structured logs, health/readiness, JSON metrics and audit verification. |
+- REST and WebSocket chat through one conversation service.
+- Transcript-based IVR turn processing with confidence, consent, DTMF, dedupe, and
+  readback controls.
+- Google ADK router, customer-service, fraud-operations, and general agents.
+- YAML procedure loading, routing, state tracking, and branching.
+- Z3/SymPy reasoning checks and covered Regulation E response controls.
+- SQLite cases, asserted/verified facts, optimistic concurrency, actions, inbox,
+  outbox, handoffs, policy, and audit evidence.
+- Typed consequential-action payloads and deterministic authorization.
+- Signed policy draft, approval, activation, retirement, and key rotation.
+- Idempotent action delivery, timeout ambiguity, retry, quarantine, and query-only
+  reconciliation.
+- JWT/RBAC, correlation IDs, rate limiting, structured errors, CORS, and production
+  settings validation.
+- Swagger/OpenAPI HTTP contracts and machine-readable WebSocket frame schemas.
+- Deterministic local provider emulators and failure injection.
+
+### Simulated or partial
+
+- STT accepts a transcript hint; it does not transcribe audio.
+- TTS returns a `sandbox://` reference; it does not generate audio.
+- Telephony acknowledges events; it does not control calls.
+- Chat delivery records local receipts; it does not send messages externally.
+- Human handoff creates a SQLite ticket; it does not connect to a contact center.
+- Action execution writes simulated SQLite effects; it does not update a real
+  upstream system.
+- The Shiny UI is a tested development/operator console, not a production customer portal.
+- Metrics are a JSON snapshot; Prometheus and OpenTelemetry are not implemented.
+- A separate worker process continuously handles delivery and reconciliation.
+
+### Not included
+
+- real vendor integrations or credentials;
+- packaged PostgreSQL/distributed database support;
+- customer-grade production frontend;
+- enterprise identity federation, managed TLS, secrets, SIEM, or WORM storage;
+- legal certification of the default NAM/Reg E profile.
+
+See the complete [capability matrix](docs/current-state.md).
+
+## Main runtime flows
+
+### Conversation
+
+1. A REST, WebSocket, or IVR client submits a normalized message.
+2. Authentication binds the actor to the serviced customer.
+3. Jurisdiction, consent, and sensitive-input rules run.
+4. The durable inbox suppresses duplicates and quarantines sequence gaps.
+5. ADK selects a specialist and follows a YAML procedure.
+6. Guardrails and deterministic reasoning inspect the response.
+7. The response contract decides whether text may stream and whether a success
+   claim is allowed.
+
+### Consequential action
+
+1. A typed action request references an authoritative resource.
+2. The service reloads the resource and rejects caller/resource mismatches.
+3. RBAC, signed policy, evidence, consent, and approval rules run.
+4. Authorization and outbox insertion commit atomically.
+5. A worker dispatches using a stable provider idempotency key.
+6. Definitive outcomes become terminal evidence.
+7. Ambiguous timeouts become `unknown` and are reconciled by querying the provider;
+   the engine does not blindly redispatch.
+
+See [Application Architecture](docs/architecture.md) for sequence diagrams.
 
 ## Quick start
 
-Prerequisites: Python 3.11+ and a Google AI API key for live model responses.
-Deterministic tests and most sandbox APIs do not require live provider credentials.
+### Prerequisites
+
+- Python 3.11 or newer;
+- a Google AI API key for live Gemini conversations;
+- Docker and Docker Compose if using containers.
+
+### Local development
 
 ```bash
 git clone https://github.com/spkc83/llm-powered-workflow-engine.git
@@ -87,112 +141,166 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# set GOOGLE_API_KEY in .env
-uvicorn main:app --port 8000
 ```
 
-Open Swagger at <http://localhost:8000/docs>. Health is `/health`; readiness is
-`/ready`.
-
-Start the operator console separately:
+Set `GOOGLE_API_KEY` in `.env`, then start the API:
 
 ```bash
-BACKEND_URL=http://localhost:8000 shiny run app_ui.py --port 8001
+uvicorn main:app --reload --port 8000
 ```
 
-Or run backend, UI, and worker together:
+Development startup creates SQLite stores and seeds reference/demo data. Production
+disables seeding by default and rejects explicit seeding.
+
+Useful development URLs:
+
+- health: <http://localhost:8000/health>
+- Swagger: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>
+- OpenAPI: <http://localhost:8000/openapi.json>
+
+### Shiny development UI
+
+```bash
+shiny run app_ui.py --port 8001
+```
+
+Open <http://localhost:8001>. The console reads `BACKEND_URL`, optionally attaches
+`BACKEND_AUTH_TOKEN`, and uses canonical v3 APIs. It is not an identity-aware
+production customer frontend. Read [Shiny UI Guide](docs/ui.md).
+
+### Docker development
 
 ```bash
 docker compose up --build
 ```
 
-Development creates and seeds the SQLite reference database. Production forbids
-automatic reference-data seeding and sandbox upstream mode.
+Compose starts the backend, UI, and separate action/reconciliation worker. The
+production overlay is a reference single-host SQLite boundary, not a turnkey
+production platform; real providers, secrets, TLS, monitoring, and approved storage
+remain deployment responsibilities.
 
-## Runtime modes
+### Database management
 
-- `UPSTREAM_MODE=disabled`: fail closed; consequential/provider endpoints return 503.
-- `UPSTREAM_MODE=sandbox`: development-only SQLite emulators with `simulated: true`.
-- `UPSTREAM_MODE=provider`: loads a trusted `PROVIDER_BUNDLE_FACTORY` supplying all
-  provider ports. The repository does not ship vendor credentials or SDK adapters.
+```bash
+python -m workflow_engine.database
+python -m workflow_engine.database --reset
+```
 
-The API and action worker are separate processes. The included SQLite production
-fallback uses one API worker and one action worker sharing a local volume. Larger or
-multi-node deployments must supply conforming stores.
+`--reset` deletes and recreates the configured reference database. Use it only for
+development data.
 
-## Main APIs
+## API surfaces
 
-- `POST /api/v1/conversations/turns` — canonical chat/IVR turn.
-- `POST /api/v1/chat` and `WS /api/v1/ws/chat` — chat compatibility transports.
-- `POST /api/v1/core/actions` — typed consequential actions.
-- `POST /api/v1/core/refunds` — refund vertical slice.
-- `/api/v1/integrations/...` — STT, TTS, telephony, chat and contract surfaces.
-- `/api/v1/handoffs` — durable human-handoff lifecycle.
-- `/api/v1/policies` — policy governance.
-- `/api/v1/operations/...` — actions, outbox, reconciliation, quarantine, receipts,
-  audit integrity and worker controls.
+The canonical API prefix is `/api/v1`.
 
-Use [API Reference](docs/api.md), live Swagger, and the
-[Upstream Integration Guide](docs/integration-guide.md) for schemas and examples.
+| Area | Primary endpoints |
+|---|---|
+| Conversation | `POST /api/v1/conversations/turns`, `POST /api/v1/chat`, `WS /api/v1/ws/chat` |
+| IVR adapters | `/api/v1/integrations/ivr/stt:transcribe`, `/tts:synthesize`, `/telephony/events` |
+| Chat provider | `/api/v1/integrations/chat/deliveries`, `/receipts` |
+| Actions | `POST /api/v1/core/actions`, `POST /api/v1/core/refunds` |
+| Human handoff | `/api/v1/handoffs` and callback/status routes |
+| Policy | `/api/v1/policies` and approve/activate/retire routes |
+| Operations | actions, events, outbox, quarantine, receipts, audit integrity, workers, metrics |
+| Contracts | `GET /api/v1/integrations/contracts` |
 
-## Procedures and supported demonstrations
-
-YAML procedures cover customer-service refunds, complaints, fraud alert triage, and
-Regulation E EFT disputes. Z3/SymPy checks and domain compliance rules verify selected
-claims and calculations. These are engineering demonstrations, not legal advice.
-
-Consequential action specifications currently cover refunds, store credit, case
-status, EFT disputes, provisional credit, escalation, case notes, account flags,
-SAR submission, and alert closure. In production, model-visible legacy write tools
-remain frozen; effects go through the typed action gateway.
-
-See [Procedure Authoring](docs/procedures.md) and
-[Policy and Data Governance](docs/governance.md).
+The detailed route, permission, lifecycle, and error reference is in
+[API Reference](docs/api.md). Swagger is the authoritative HTTP schema.
 
 ## Configuration
 
-Configuration is environment-driven and validated at startup. Important groups are:
+The application uses Pydantic settings and environment variables. Key groups are:
 
-- core, reference, policy, and ADK session databases;
-- JWT/RBAC and CORS;
+- application and CORS;
+- Gemini/ADK;
+- core, policy, reference, session, and sandbox storage;
+- JWT/RBAC;
 - policy signing and jurisdiction;
-- upstream mode and provider bundle;
-- action worker leases/reconciliation;
-- LLM, logging, rate limits and operator UI.
+- upstream mode and worker timing;
+- rate limiting, logging, metrics, tracing, reasoning, and compliance.
 
-The complete source-aligned reference is [Configuration](docs/configuration.md).
+Read [Configuration Reference](docs/configuration.md) before changing deployment
+profiles. Important production invariants are enforced at startup, including auth,
+secret, CORS, sandbox, algorithm, and seeding checks.
 
-## Testing
+## Storage
+
+SQLite is the built-in development/default/fallback implementation. By default:
+
+- `data/workflow.db` contains reference business data, local audit, core, and policy
+  data;
+- `data/adk_sessions_v2.db` contains untrusted ADK session/event state;
+- `data/upstream_sandbox.db` contains simulated provider state.
+
+Core and policy protocols accept deployment-supplied adapters. No PostgreSQL adapter
+ships with the project. See [Storage and Database Adapters](docs/database.md).
+
+## Security model
+
+- Model, prompt, transcript, tool arguments, and ADK state are untrusted.
+- Actor and customer identities are bound separately.
+- Consequential actions require typed parameters, RBAC, active signed policy,
+  authoritative evidence, and durable idempotency.
+- Production rejects default secrets, disabled auth, wildcard CORS, sandbox mode,
+  unsafe JWT algorithms, and demo-data seeding.
+- Local audit hashes make tampering detectable but do not replace external immutable
+  retention.
+
+Read [Threat Model](docs/threat-model.md) and [Security Policy](SECURITY.md).
+
+## Tests
+
+The deterministic suite currently contains 426 tests:
 
 ```bash
 pytest -q
-ruff check app_ui.py main.py workflow_engine tests --ignore E402
-mypy --ignore-missing-imports --follow-imports=skip main.py workflow_engine
-python -m compileall -q app_ui.py main.py workflow_engine tests
-docker compose config --quiet
 ```
 
-The deterministic suite does not prove live Gemini quality, real provider behavior,
-legal approval, or a deployment-supplied database. See [Testing](docs/testing.md).
+It does not test real providers, complete browser interaction, or legal certification. See
+[Testing and Verification](docs/testing.md) for exact coverage and exclusions.
 
-## Documentation
+## Repository map
 
-- [Documentation index](docs/README.md)
-- [Current state and limitations](docs/current-state.md)
-- [Core architecture](docs/core-engine.md)
-- [Configuration](docs/configuration.md)
-- [API](docs/api.md)
-- [Chat and IVR](docs/channels.md)
-- [Provider integration](docs/integration-guide.md)
-- [UI console](docs/ui.md)
-- [Storage](docs/database.md)
-- [Operations](docs/operations.md)
-- [Threat model](docs/threat-model.md)
-- [Migration](docs/migration.md)
-- [Testing](docs/testing.md)
-- [Security](SECURITY.md) and [Support](SUPPORT.md)
+```text
+main.py                         FastAPI composition root and routes
+app_ui.py                       Shiny development UI (legacy/partial)
+procedures/                     YAML conversational procedures
+workflow_engine/agents/         ADK router and specialist agents
+workflow_engine/conversation/   shared chat/IVR processing and response contracts
+workflow_engine/core/           kernel, policy, action gateway, workers, routing
+workflow_engine/integrations/   provider protocols and SQLite sandbox adapters
+workflow_engine/database/       reference schema, seeding, repositories, audit
+workflow_engine/auth/           JWT identities, roles, and permissions
+workflow_engine/procedures/     YAML loading, registry, and executor
+tests/                          deterministic unit and integration tests
+docs/                           architecture, operation, integration, and user manuals
+```
+
+## Documentation map
+
+- [Application Architecture](docs/architecture.md) — how the system works end to end.
+- [Current Implementation Status](docs/current-state.md) — implemented, partial,
+  sandbox, deployment-supplied, and missing capabilities.
+- [Configuration Reference](docs/configuration.md) — every configuration group and
+  production invariant.
+- [API Reference](docs/api.md) — routes and contracts.
+- [Upstream Integration Guide](docs/integration-guide.md) — provider boundaries.
+- [Shiny UI Guide](docs/ui.md) — current UI behavior and limitations.
+- [Testing and Verification](docs/testing.md) — what tests prove and exclude.
+- [Core Engine](docs/core-engine.md) — control-plane invariants.
+- [Database](docs/database.md) — stores, tables, and portability.
+- [Operations](docs/operations.md) — startup, workers, recovery, and canary.
+- [Governance](docs/governance.md) — policy and jurisdiction.
+- [Threat Model](docs/threat-model.md) — trust boundaries and residual risk.
+- [Migration](docs/migration.md) — v2 to v3 upgrade.
+- [Procedure Authoring](docs/procedures.md) — YAML workflow extension.
+- [Chat and IVR Channels](docs/channels.md) — channel contracts.
+- [User Guide](docs/user-guide.md) — customer and service-operator behavior.
 
 ## Contributing and license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [CONTRIBUTORS.md](CONTRIBUTORS.md).
-Released under the [MIT License](LICENSE).
+The project is maintained by `spkc83`. See [Contributors](CONTRIBUTORS.md) and
+[Contributing](CONTRIBUTING.md).
+
+Licensed under the [MIT License](LICENSE).
