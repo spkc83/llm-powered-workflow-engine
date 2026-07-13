@@ -58,7 +58,30 @@ Do not bake the token into an image or commit it.
 ### Chat
 
 Sends a message to `/api/v1/chat`, tracks the returned session ID, refreshes
-workflow state, and displays the guarded model response.
+workflow state, and displays the guarded model response. Structured action
+proposals appear below chat as cards with authoritative preview, expiry, and state.
+Pending cards expose **Confirm action** and **Cancel**. Confirmed cards expose
+**Refresh status** and show action outcome/event evidence returned by the backend.
+
+The UI never parses assistant prose to decide whether an action exists or
+succeeded. It uses `action_proposals` and the proposal/status endpoints.
+
+### Demonstrate a refund action
+
+1. Run the backend in development sandbox mode and start the worker/UI.
+2. Select `CUST-456`.
+3. Ask for a refund for `ORD-123` and provide a reason when requested.
+4. A pending card appears only after the proposal-only tool and trusted backend
+   preparation reload the authoritative order.
+5. Review amount, currency, payment method, reason, and expiry.
+6. Click **Confirm action**. The UI sends only the proposal ID; it cannot replace
+   customer, amount, policy, endpoint, credential, or idempotency key.
+7. Read the linked action state and event history. The built-in demo writes the
+   local SQLite refund effect through the typed gateway.
+8. Use **Refresh status** after an ambiguous scenario or worker processing.
+
+Cancel creates no effect. Stale resources, expired proposals, ownership mismatch,
+or missing authorization produce an error instead of execution.
 
 ### Test Scenarios
 
@@ -93,7 +116,7 @@ the configured backend address.
 
 `docker-compose.yml` sets `BACKEND_URL=http://backend:8000`, starts the API, waits
 for `/ready`, and starts the UI and worker services. The earlier hardcoded-localhost
-defect is fixed in v3.1.0.
+defect remains fixed; v3.2 adds action-card support to the typed client.
 
 The production overlay enables backend auth but does not create an identity-aware UI
 login flow. A deployment that retains this console must inject a suitable token or
@@ -104,7 +127,7 @@ place it behind a trusted operator access layer.
 - audio capture, call control, or IVR media playback;
 - real provider delivery or contact-center staffing;
 - policy authoring and approval workflows;
-- full action/outbox/reconciliation/handoff administration;
+- full outbox/reconciliation/handoff/policy administration;
 - customer-grade authentication, accessibility certification, localization, or
   product analytics;
 - a complete browser automation suite.
@@ -119,6 +142,7 @@ policy, and worker APIs.
 - environment-based backend URL;
 - optional bearer header;
 - canonical v3 paths;
+- action catalog, proposal create/list/get/confirm/cancel, and action status paths;
 - API client behavior;
 - app import and ASGI HTML rendering.
 
@@ -134,4 +158,7 @@ responsive-layout, session, and identity tests.
 | Chat returns 401/403 | Missing/underprivileged token | `BACKEND_AUTH_TOKEN` role and customer binding. |
 | Status panel fails | Token lacks admin read | RBAC permissions. |
 | No model response | Missing Gemini credential or provider error | API logs and `GOOGLE_API_KEY`/Vertex config. |
+| No action card | Agent did not reach a proposal tool, validation failed, or backend is older | API logs, workflow state, proposal list endpoint. |
+| Confirm fails | Expiry, stale resource/binding, ownership, permission, or evidence error | Proposal/API error; prepare a fresh proposal after review. |
+| Action is `unknown` | Provider result was ambiguous | Run reconciliation; do not blindly submit again. |
 | Scenario result differs | Model variation or changed seed data | Core tests, workflow state, and scenario assumptions. |

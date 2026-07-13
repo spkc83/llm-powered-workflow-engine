@@ -15,7 +15,12 @@ def authorize_tool(
     control = TOOL_CATALOG[tool_name]
     required = control.required_permission
     permissions = set(tool_context.state.get("actor_permissions", []))
-    if required is not None and required.value not in permissions:
+    self_service = (
+        control.self_service_allowed
+        and tool_context.state.get("actor_role") == "customer"
+        and bool(tool_context.state.get("customer_id"))
+    )
+    if required is not None and required.value not in permissions and not self_service:
         raise AuthorizationError(
             f"Tool '{tool_name}' is not authorized for this actor",
             required_permission=required.value,

@@ -134,6 +134,14 @@ class Settings(BaseSettings):
         default=None,
         description="Trusted package.module:callable returning a complete ProviderBundle",
     )
+    action_registry_path: Optional[Path] = Field(
+        default=None,
+        description="Versioned YAML/JSON mapping of closed-catalog actions to provider services",
+    )
+    action_secret_provider_factory: Optional[str] = Field(
+        default=None,
+        description="Trusted package.module:callable resolving secret:// references",
+    )
     action_worker_lease_seconds: int = Field(default=30, ge=5, le=3600)
     action_reconciliation_delay_seconds: int = Field(default=30, ge=0, le=86400)
 

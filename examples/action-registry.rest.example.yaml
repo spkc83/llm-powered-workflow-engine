@@ -1,0 +1,41 @@
+# Runnable configuration example after COMMERCE_ACTION_TOKEN is set and
+# commerce.example.com is replaced by the deployment's real HTTPS provider.
+version: 1
+bindings:
+  - action_name: issue_store_credit
+    binding_id: commerce-credit
+    binding_version: "1"
+    contract_version: "1"
+    transport: rest
+    base_url: https://commerce.example.com
+    allowed_hosts: [commerce.example.com]
+    timeout_seconds: 10
+    idempotency_header: Idempotency-Key
+    secret_ref: env://COMMERCE_ACTION_TOKEN
+    auth_header: Authorization
+    auth_scheme: Bearer
+    openapi:
+      path: openapi/commerce-actions.yaml
+      sha256: 1119aed43f75aedb01aa70aabc9976aad9d8935354fd2dfdcdefe1a5e92f1228
+    execute:
+      operation_id: issueStoreCredit
+      method: POST
+      path: /credits
+      body:
+        orderId: $.parameters.order_id
+        amount: $.parameters.amount
+        currency: $.parameters.currency
+        reason: $.parameters.reason
+    reconcile:
+      operation_id: getStoreCredit
+      method: GET
+      path: /credits/status
+      query:
+        idempotencyKey: $.idempotency_key
+    statuses:
+      succeeded: [200, 201]
+      accepted: [202]
+      failed: [400, 401, 403, 404, 409, 422]
+    provider_operation_id_pointer: $.provider_operation_id
+    response_fields:
+      credit_id: $.credit.id

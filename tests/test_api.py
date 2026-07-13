@@ -258,6 +258,116 @@ class TestCoreRefundEndpoint:
         assert response.status_code == 404
 
 
+class TestActionProposalBridge:
+    @pytest.mark.asyncio
+    async def test_demo_refund_proposal_confirms_through_typed_gateway(self, client):
+        conversation_id = f"demo-actions-{uuid.uuid4().hex}"
+        proposed = await client.post(
+            "/api/v1/action-proposals",
+            json={
+                "customer_id": "CUST-456",
+                "action": "issue_refund",
+                "arguments": {
+                    "order_id": "ORD-123",
+                    "reason": "customer confirmed damaged item",
+                },
+                "resource": {"resource_type": "order", "resource_id": "ORD-123"},
+                "conversation_id": conversation_id,
+            },
+        )
+        assert proposed.status_code == 200
+        proposal = proposed.json()
+        assert proposal["status"] == "pending"
+        assert proposal["safe_preview"]["refund_amount"] == 79.99
+        assert proposal["connector_binding_id"].startswith("sqlite-demo:")
+
+        listed = await client.get(
+            "/api/v1/action-proposals",
+            params={"conversation_id": conversation_id},
+        )
+        assert [item["proposal_id"] for item in listed.json()["action_proposals"]] == [
+            proposal["proposal_id"]
+        ]
+
+        confirmed = await client.post(
+            f"/api/v1/action-proposals/{proposal['proposal_id']}/confirm"
+        )
+        assert confirmed.status_code == 200
+        receipt = confirmed.json()
+        assert receipt["status"] == "confirmed"
+        assert receipt["action_record"]["status"] == "succeeded"
+
+        status = await client.get(f"/api/v1/actions/{receipt['action_id']}")
+        assert status.status_code == 200
+        assert status.json()["action"]["status"] == "succeeded"
+        assert status.json()["events"]
+
+    @pytest.mark.asyncio
+    async def test_action_catalog_and_swagger_publish_bridge_contracts(self, client):
+        catalog = await client.get("/api/v1/actions/catalog")
+        assert catalog.status_code == 200
+        assert "issue_refund" in {item["name"] for item in catalog.json()["actions"]}
+
+        document = (await client.get("/openapi.json")).json()
+        paths = document["paths"]
+        assert "/api/v1/action-proposals" in paths
+        assert "/api/v1/action-proposals/{proposal_id}/confirm" in paths
+        assert "/api/v1/actions/{action_id}" in paths
+        assert (
+            paths["/api/v1/action-proposals"]["post"]["responses"]["200"]
+            ["content"]["application/json"]["schema"]["$ref"]
+            == "#/components/schemas/ActionProposalResponse"
+        )
+        assert (
+            paths["/api/v1/actions/{action_id}"]["get"]["responses"]["200"]
+            ["content"]["application/json"]["schema"]["$ref"]
+            == "#/components/schemas/ActionStatusResponse"
+        )
+
+    @pytest.mark.asyncio
+    async def test_shiny_confirmation_sequence_reaches_sqlite_effect_and_events(
+        self, client
+    ):
+        import app_ui
+
+        proposed = await client.post(
+            "/api/v1/action-proposals",
+            json={
+                "customer_id": "CUST-456",
+                "action": "issue_refund",
+                "arguments": {
+                    "order_id": "ORD-123",
+                    "reason": "customer confirmed damaged item",
+                },
+                "resource": {"resource_type": "order", "resource_id": "ORD-123"},
+                "conversation_id": f"shiny-e2e-{uuid.uuid4().hex}",
+            },
+        )
+        assert proposed.status_code == 200
+
+        class ShinyApiAdapter:
+            async def confirm_action_proposal(self, proposal_id):
+                response = await client.post(
+                    f"/api/v1/action-proposals/{proposal_id}/confirm"
+                )
+                response.raise_for_status()
+                return response.json()
+
+            async def action_status(self, action_id):
+                response = await client.get(f"/api/v1/actions/{action_id}")
+                response.raise_for_status()
+                return response.json()
+
+        confirmation, record = await app_ui._confirm_and_load_action(
+            ShinyApiAdapter(), proposed.json()["proposal_id"]
+        )
+        assert confirmation["state"] == "confirmed"
+        assert record["status"] == "succeeded"
+        assert record["outcome"]["status"] == "processed"
+        assert record["outcome"]["refund_id"].startswith("REF-")
+        assert record["events"][-1]["status"] == "succeeded"
+
+
 class TestIvrEndpoint:
     @pytest.mark.asyncio
     async def test_low_confidence_turn_requires_readback_and_dedupes(self, client):

@@ -22,6 +22,9 @@ pyyaml
 # HTTP client (UI ↔ backend)
 httpx
 
+# Optional agent interoperability facade (stable v1 SDK)
+mcp>=1.27,<2
+
 # Chat UI
 shiny
 
