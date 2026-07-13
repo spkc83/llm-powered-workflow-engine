@@ -43,32 +43,94 @@ async def kernel(tmp_path):
     return CaseKernel(store)
 
 
+async def _commit_refund_facts(
+    kernel,
+    case_id: str,
+    expected_version: int,
+    *,
+    order_id: str = "ORD-123",
+    customer_id: str = "CUST-456",
+    amount: float = 79.99,
+    currency: str = "USD",
+    payment_method: str = "credit_card",
+    order_authority: FactAuthority = FactAuthority.VERIFIED,
+):
+    case = await kernel.commit_fact(
+        case_id,
+        FactProposal(
+            name="issue_refund.order_id",
+            value=order_id,
+            authority=order_authority,
+            source="orders_db",
+            evidence_ref=f"order:{order_id}",
+        ),
+        expected_version=expected_version,
+    )
+    for name, value in {
+        "customer_id": customer_id,
+        "refund_amount": amount,
+        "currency": currency,
+        "payment_method": payment_method,
+    }.items():
+        case = await kernel.commit_fact(
+            case_id,
+            FactProposal(
+                name=f"issue_refund.{name}",
+                value=value,
+                authority=FactAuthority.VERIFIED,
+                source="orders_db",
+                evidence_ref=f"order:{order_id}",
+            ),
+            case.version,
+        )
+    return case
+
+
+def _refund_command(
+    *,
+    case_id: str,
+    idempotency_key: str,
+    order_id: str = "ORD-123",
+    customer_id: str = "CUST-456",
+    amount: float = 79.99,
+) -> ActionCommand:
+    return ActionCommand(
+        action="issue_refund",
+        case_id=case_id,
+        policy_package_id="refund@1.0.0",
+        actor_id="rep-1",
+        idempotency_key=idempotency_key,
+        consent_evidence_ref="test:consent",
+        parameters={
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "refund_amount": amount,
+            "currency": "USD",
+            "payment_method": "credit_card",
+            "reason": "customer_request",
+        },
+        parameter_fact_refs={
+            "order_id": "issue_refund.order_id",
+            "customer_id": "issue_refund.customer_id",
+            "refund_amount": "issue_refund.refund_amount",
+            "currency": "issue_refund.currency",
+            "payment_method": "issue_refund.payment_method",
+        },
+        required_fact_authority={
+            "order_id": FactAuthority.VERIFIED,
+            "customer_id": FactAuthority.VERIFIED,
+            "refund_amount": FactAuthority.VERIFIED,
+            "currency": FactAuthority.VERIFIED,
+            "payment_method": FactAuthority.VERIFIED,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_verified_fact_and_idempotent_action_lifecycle(kernel):
     await kernel.create_case("CASE-1", "CUST-456", "cs_refund", "1.0.0")
-    case = await kernel.commit_fact(
-        "CASE-1",
-        FactProposal(
-            name="order_id",
-            value="ORD-123",
-            authority=FactAuthority.VERIFIED,
-            source="orders_db",
-            evidence_ref="order:ORD-123",
-        ),
-        expected_version=0,
-    )
-
-    command = ActionCommand(
-        action="issue_refund",
-        case_id="CASE-1",
-        policy_package_id="refund@1.0.0",
-        actor_id="rep-1",
-        idempotency_key="refund:ORD-123",
-        consent_evidence_ref="test:consent",
-        parameters={"order_id": "ORD-123", "amount": 79.99},
-        parameter_fact_refs={"order_id": "order_id"},
-        required_fact_authority={"order_id": FactAuthority.VERIFIED},
-    )
+    case = await _commit_refund_facts(kernel, "CASE-1", 0)
+    command = _refund_command(case_id="CASE-1", idempotency_key="refund:ORD-123")
     first = await kernel.authorize_action(command, expected_version=case.version)
     duplicate = await kernel.authorize_action(command, expected_version=case.version + 1)
 
@@ -79,28 +141,13 @@ async def test_verified_fact_and_idempotent_action_lifecycle(kernel):
 @pytest.mark.asyncio
 async def test_asserted_fact_cannot_authorize_verified_precondition(kernel):
     await kernel.create_case("CASE-2", "CUST-456", "cs_refund", "1.0.0")
-    case = await kernel.commit_fact(
+    case = await _commit_refund_facts(
+        kernel,
         "CASE-2",
-        FactProposal(
-            name="order_id",
-            value="ORD-123",
-            authority=FactAuthority.ASSERTED,
-            source="customer",
-            evidence_ref="message:m1",
-        ),
-        expected_version=0,
+        0,
+        order_authority=FactAuthority.ASSERTED,
     )
-    command = ActionCommand(
-        action="issue_refund",
-        case_id="CASE-2",
-        policy_package_id="refund@1.0.0",
-        actor_id="rep-1",
-        idempotency_key="refund:ORD-123",
-        consent_evidence_ref="test:consent",
-        parameters={"order_id": "ORD-123"},
-        parameter_fact_refs={"order_id": "order_id"},
-        required_fact_authority={"order_id": FactAuthority.VERIFIED},
-    )
+    command = _refund_command(case_id="CASE-2", idempotency_key="refund:ORD-123")
 
     with pytest.raises(ValueError, match="authority"):
         await kernel.authorize_action(command, expected_version=case.version)
@@ -229,21 +276,8 @@ async def test_gateway_records_unknown_then_reconciles_without_redispatch(kernel
             return ConnectorOutcome.succeeded({"provider_ref": "p-1", "settled": True})
 
     await kernel.create_case("CASE-4", "CUST-456", "cs_refund", "1.0.0")
-    case = await kernel.commit_fact(
-        "CASE-4",
-        FactProposal(
-            name="order_id", value="ORD-123", authority=FactAuthority.VERIFIED,
-            source="orders_db", evidence_ref="order:ORD-123",
-        ),
-        expected_version=0,
-    )
-    command = ActionCommand(
-        action="issue_refund", case_id="CASE-4", policy_package_id="refund@1.0.0",
-        actor_id="rep-1", idempotency_key="refund:ORD-123",
-        consent_evidence_ref="test:consent",
-        parameters={"order_id": "ORD-123"}, parameter_fact_refs={"order_id": "order_id"},
-        required_fact_authority={"order_id": FactAuthority.VERIFIED},
-    )
+    case = await _commit_refund_facts(kernel, "CASE-4", 0)
+    command = _refund_command(case_id="CASE-4", idempotency_key="refund:ORD-123")
     action = await kernel.authorize_action(command, case.version)
     connector = AmbiguousConnector()
     gateway = ActionGateway(kernel, {"issue_refund": connector})
@@ -270,22 +304,11 @@ async def test_concurrent_gateway_dispatch_claims_action_once(kernel):
             return ConnectorOutcome.succeeded(prior or {})
 
     await kernel.create_case("CASE-CONCURRENT", "CUST-456", "cs_refund", "1.0.0")
-    case = await kernel.commit_fact(
-        "CASE-CONCURRENT",
-        FactProposal(
-            name="order_id", value="ORD-123", authority=FactAuthority.VERIFIED,
-            source="orders_db", evidence_ref="order:ORD-123",
-        ),
-        0,
-    )
+    case = await _commit_refund_facts(kernel, "CASE-CONCURRENT", 0)
     action = await kernel.authorize_action(
-        ActionCommand(
-            action="issue_refund", case_id="CASE-CONCURRENT",
-            policy_package_id="refund@1.0.0", actor_id="rep-1",
-            idempotency_key="refund:concurrent", consent_evidence_ref="test:consent",
-            parameters={"order_id": "ORD-123"},
-            parameter_fact_refs={"order_id": "order_id"},
-            required_fact_authority={"order_id": FactAuthority.VERIFIED},
+        _refund_command(
+            case_id="CASE-CONCURRENT",
+            idempotency_key="refund:concurrent",
         ),
         case.version,
     )
@@ -305,22 +328,11 @@ async def test_connector_exception_becomes_unknown_not_false_failure(kernel):
             return ConnectorOutcome.unknown(prior or {})
 
     await kernel.create_case("CASE-TIMEOUT", "CUST-456", "cs_refund", "1.0.0")
-    case = await kernel.commit_fact(
-        "CASE-TIMEOUT",
-        FactProposal(
-            name="order_id", value="ORD-123", authority=FactAuthority.VERIFIED,
-            source="orders_db", evidence_ref="order:ORD-123",
-        ),
-        0,
-    )
+    case = await _commit_refund_facts(kernel, "CASE-TIMEOUT", 0)
     action = await kernel.authorize_action(
-        ActionCommand(
-            action="issue_refund", case_id="CASE-TIMEOUT",
-            policy_package_id="refund@1.0.0", actor_id="rep-1",
-            idempotency_key="refund:timeout", consent_evidence_ref="test:consent",
-            parameters={"order_id": "ORD-123"},
-            parameter_fact_refs={"order_id": "order_id"},
-            required_fact_authority={"order_id": FactAuthority.VERIFIED},
+        _refund_command(
+            case_id="CASE-TIMEOUT",
+            idempotency_key="refund:timeout",
         ),
         case.version,
     )

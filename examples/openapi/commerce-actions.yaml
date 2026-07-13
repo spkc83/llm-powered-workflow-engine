@@ -1,0 +1,33 @@
+openapi: 3.1.0
+info:
+  title: Example Commerce Action Provider
+  version: 1.0.0
+paths:
+  /credits:
+    post:
+      operationId: issueStoreCredit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, amount, currency, reason]
+              properties:
+                orderId: {type: string}
+                amount: {type: number, exclusiveMinimum: 0}
+                currency: {type: string}
+                reason: {type: string}
+      responses:
+        "201": {description: Credit issued}
+        "202": {description: Credit accepted for processing}
+  /credits/status:
+    get:
+      operationId: getStoreCredit
+      parameters:
+        - in: query
+          name: idempotencyKey
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Current credit status}

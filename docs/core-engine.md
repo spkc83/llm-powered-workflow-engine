@@ -37,6 +37,10 @@ REST / WebSocket / telephony adapters
                 |
       ADK proposal/wording layer
                 |
+     durable ActionBridge proposal
+                |
+       trusted host confirmation
+                |
  case/fact kernel + active signed policy
                 |
        typed ActionGateway
@@ -51,10 +55,11 @@ payload, permission, required parameters, authoritative fact references, and
 consent/approval requirement. Unknown actions and missing/stale/mismatched evidence
 fail closed.
 
-The model-visible legacy action tools remain production-frozen. Production
-integrations submit typed commands through the action service. The service reloads
-a registered authoritative resource; a client cannot promote its own value to
-verified.
+Consequential model tools are proposal-only in every environment. Trusted code
+creates a pending proposal; host confirmation revalidates ownership, expiry,
+resource and connector versions, consent/approval, and policy before the typed
+service runs. The registry stamps immutable binding/contract versions. REST and
+Python bindings execute; WebSocket bindings are validation-only in v3.2.
 
 ## Durable execution
 
@@ -71,12 +76,16 @@ after the configured delay and enters that same query-only reconciliation path.
 ## End-to-end action sequence
 
 ```text
-client → action service: typed command + idempotency key
+conversation/model → bridge: untrusted intent
+bridge → core store: pending proposal + authoritative preview
+host → bridge: authenticated confirmation
+bridge → action service: server-derived typed command + idempotency key
 action service → authoritative adapter: reload current resource/version
 action service → policy/core: verify permission, facts, consent and active signature
-core → database: commit action + outbox atomically
-worker → provider: dispatch once with stable idempotency key
-provider → worker: succeeded, failed, or unknown
+action service → provider: synchronous first dispatch with stable idempotency key
+core → database: persist succeeded, failed, or unknown
+worker → core: lease outbox and recover only still-authorized actions
+worker → provider: dispatch if the request path stopped before dispatch
 reconciler → provider: query ambiguous outcome without redispatch
 ```
 
@@ -129,4 +138,4 @@ policies, adapter mode, and audit-chain verification.
 
 The metrics endpoint is an authenticated JSON snapshot, not Prometheus exposition.
 Prometheus, OpenTelemetry, dashboards, alert routing, external audit anchoring, and
-immutable retention are deployment responsibilities in v3.1.0.
+immutable retention are deployment responsibilities in v3.2.0.

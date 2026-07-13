@@ -11,11 +11,14 @@ from ..tools.fraud_tools import (
     get_fraud_alert,
     get_account_transactions,
     check_device_fingerprint,
+)
+from ..tools.action_proposals import (
+    add_case_note,
+    close_alert,
+    escalate_to_supervisor,
     flag_account,
     submit_sar,
-    close_alert,
 )
-from ..tools.common_tools import escalate_to_supervisor, add_case_note
 
 
 FRAUD_PERSONA = """You are a skilled fraud operations analyst responsible for triaging
@@ -46,6 +49,8 @@ Additional guidelines:
 - When in doubt, escalate to a senior analyst rather than making an uncertain determination
 - Follow SAR filing thresholds and regulatory requirements
 - Use professional, factual language in all communications and documentation
+- Consequential tools only create proposals. Never claim a proposal executed;
+  wait for host confirmation and authoritative action status.
 """
 
 # Map tool name strings (from YAML) to actual Python functions

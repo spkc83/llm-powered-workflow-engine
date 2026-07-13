@@ -1,6 +1,6 @@
 # Current Application State
 
-Last verified: version 3.1.0, 2026-07-12.
+Last verified: version 3.2.0, 2026-07-13.
 
 This is the authoritative feature-status statement. It distinguishes working code
 from local simulation and deployment-supplied integrations.
@@ -20,7 +20,13 @@ from local simulation and deployment-supplied integrations.
 |---|---|---|---|
 | Core cases and facts | Implemented | SQLite persistence, asserted/verified authority, evidence, expiry, supersession, optimistic concurrency. | Only SQLite implementation ships. |
 | Typed actions | Implemented | Closed schemas, RBAC, customer binding, authoritative reload, policy, consent/approval, idempotency. | External effect depends on sandbox or deployment provider. |
-| Action delivery | Implemented | Atomic action/outbox transaction, leases, retries, quarantine, stable provider key. | Provider correctness must be certified separately. |
+| Conversation-to-action bridge | Implemented | Proposal-only ADK tools, trusted preparation, durable preview, host confirm/cancel, typed gateway submission. | Confirmation UX is Shiny/demo quality; no step-up/customer-signature product. |
+| Proposal lifecycle | Implemented | Pending, confirmed, cancelled, expired; actor/customer ownership, resource/binding version checks, replay recovery. | Expiry is lazy; no background proposal sweeper. |
+| Action connector registry | Implemented | Closed-catalog SQLite, pinned REST/OpenAPI, Python factory, immutable binding/contract versions. | New action semantics still require code; registry is not a no-code action designer. |
+| REST provider connector | Implemented contract/runtime | Idempotency header, bounded timeout, explicit status map, query reconciliation, allowlisted response persistence. | No generic signed callback route; provider conformance remains deployment work. |
+| Provider WebSocket actions | Contract only | Binding model validates URL/host/message/ACK/outcome/reconcile fields. | Enabled generic WS binding fails startup; use a reviewed Python connector. |
+| MCP façade | Implemented, proposal-only | Authenticated Streamable HTTP at `/mcp`; prepare/status tools, catalog/status resources, safety/workflow prompts. | No confirm, approve, execute, dispatch, provider configuration, or raw connector tool. |
+| Action delivery | Implemented | Atomic action/outbox transaction, synchronous first dispatch, worker recovery for still-authorized records, leases, quarantine, stable provider key. | Provider correctness must be certified separately. |
 | Reconciliation | Implemented | Ambiguous and stale dispatch becomes unknown; provider is queried without redispatch. | Provider must support truthful query semantics. |
 | Worker process | Implemented | `python -m workflow_engine.worker`; separate Compose service; graceful signal handling. | No packaged scheduler/orchestrator beyond the process loop. |
 | Policy governance | Implemented | Draft, separate approval, HMAC signing, activation, retirement, durable history, key rotation. | No graphical authoring UI or external KMS client. |
@@ -43,20 +49,18 @@ from local simulation and deployment-supplied integrations.
 | Tracing | Not packaged | Structured correlation logging exists. | No OpenTelemetry exporter ships. |
 | SQLite | Implemented | Development/default/fallback; supported reference topology is one API plus one worker on one host/volume. | Not validated for multi-node/high-write production. |
 | Other databases | Deployment-supplied | Core and policy factory contracts. | No PostgreSQL adapter ships; a URL alone is insufficient. |
-| Shiny UI | Implemented development console | Configurable backend, optional bearer token, canonical v3 chat/data/status APIs, client/import/ASGI tests. | Not a production customer portal; only a subset of operations; no full browser suite. |
+| Shiny UI | Implemented development console | Configurable backend/token, chat, structured action cards, confirm/cancel, status/event refresh, data/status views. | Not a production customer portal; no full browser/accessibility suite. |
 | Swagger | Implemented | OpenAPI, Swagger, ReDoc, HTTP examples, separate WebSocket schemas. | Does not substitute for provider certification. |
 | Docker Compose | Implemented reference | Backend, Shiny UI, and worker; single-worker SQLite production fallback. | Real secrets, TLS, provider bundle, monitoring, backups, and approved storage remain external. |
 
-## Important development/production difference
+## Development and production behavior
 
-In production, model-visible consequential tools are removed from the ADK agents.
-The conversation path can gather information and explain that an authorized action
-workflow is required, but it cannot submit the action gateway automatically.
-
-In development, legacy model write tools remain available for historical demo
-scenarios and may update the local reference SQLite database. They bypass the v3
-typed action service and are not evidence of production action execution. New
-integration work should exercise `/api/v1/core/actions` or `/api/v1/core/refunds`.
+Both development and production agents use proposal-only consequential tools. A
+model call can produce a durable pending proposal after trusted validation but
+cannot confirm or execute it. Development sandbox mode automatically binds the
+closed catalog to local SQLite connectors so Shiny can demonstrate the full safe
+path. Production rejects SQLite/demo bindings and requires reviewed provider
+configuration. Direct typed APIs remain for trusted service integrations.
 
 ## Supported demonstrations
 
@@ -65,6 +69,8 @@ integration work should exercise `/api/v1/core/actions` or `/api/v1/core/refunds
 - Regulation E EFT dispute guidance and encoded checks;
 - typed sandbox actions for refund, store credit, case status, dispute, provisional
   credit, escalation, note, account flag, SAR, and alert closure;
+- natural-language chat to structured proposal card to host confirmation to SQLite
+  effect and action event history;
 - post-commit timeout and reconciliation without duplicate effect;
 - provider message duplication and ordering gaps;
 - policy approval, retirement, restart, and key rotation;
@@ -88,6 +94,9 @@ modes. It does not prove:
 
 ## Safe product description
 
-Version 3.1.0 is a durable, provider-neutral workflow control plane, SQLite
-reference implementation, integration contract, worker runtime, and development
-console. It is not a turnkey production financial/contact-center platform.
+Version 3.2.0 is a durable, provider-neutral workflow control plane with a trusted
+conversation-to-action proposal bridge, SQLite reference implementation,
+configurable action connector registry, worker runtime, and development console.
+It is not a turnkey production financial/contact-center platform.
+
+See [Roadmap and Remaining Work](roadmap.md) for the ordered gap list.

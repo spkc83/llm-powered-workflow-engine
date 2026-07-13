@@ -1,14 +1,40 @@
 """Application facade for deterministic vertical slices."""
 
+from typing import Any
+
+from workflow_engine.core.action_service import (
+    AuthoritativeResourceRef,
+    ConsequentialActionRequest,
+    ConsequentialActionService,
+)
 from workflow_engine.core.domains import OrderSnapshot, RefundDecisionService
 from workflow_engine.core.gateway import ActionGateway
-from workflow_engine.core.kernel import (
-    ActionCommand,
-    ActionRecord,
-    CaseKernel,
-    FactAuthority,
-    FactProposal,
-)
+from workflow_engine.core.kernel import ActionRecord, CaseKernel
+
+
+class _SingleOrderResourceProvider:
+    def __init__(self, order: OrderSnapshot):
+        self.order = order
+
+    async def get_resource(
+        self, resource_type: str, resource_id: str
+    ) -> dict[str, Any] | None:
+        if resource_type != "order" or resource_id != self.order.order_id:
+            return None
+        return {
+            "payload": {
+                "order_id": self.order.order_id,
+                "customer_id": self.order.customer_id,
+                "status": self.order.status,
+                "days_since_delivery": self.order.days_since_delivery,
+                "amount": self.order.amount,
+                "refund_amount": self.order.amount,
+                "currency": "USD",
+                "payment_method": self.order.payment_method,
+            },
+            "version": 1,
+            "evidence_ref": self.order.evidence_ref,
+        }
 
 
 class CoreEngine:
@@ -40,57 +66,33 @@ class CoreEngine:
         if not decision.eligible:
             raise ValueError(f"Refund is not eligible: {decision.reason}")
 
-        existing_action = await self.kernel.store.get_action_by_key(decision.idempotency_key)
-        if existing_action is not None:
-            return await self.gateway.dispatch(existing_action)
-
-        case = await self.kernel.store.get_case(case_id)
-        if case is None:
-            case = await self.kernel.create_case(
-                case_id, authenticated_customer_id, "cs_refund", procedure_version
-            )
-        case = await self.kernel.commit_fact(
-            case_id,
-            FactProposal(
-                name="order_id", value=order.order_id, authority=FactAuthority.VERIFIED,
-                source="orders_db", evidence_ref=order.evidence_ref,
+        service = ConsequentialActionService(
+            self.kernel,
+            self.gateway,
+            _SingleOrderResourceProvider(order),
+        )
+        return await service.submit(
+            ConsequentialActionRequest(
+                case_id=case_id,
+                customer_id=authenticated_customer_id,
+                procedure_id="cs_refund",
+                procedure_version=procedure_version,
+                policy_package_id=policy_package_id,
+                idempotency_key=decision.idempotency_key,
+                resource=AuthoritativeResourceRef(
+                    resource_type="order",
+                    resource_id=order.order_id,
+                ),
+                payload={
+                    "action": "issue_refund",
+                    "order_id": order.order_id,
+                    "customer_id": authenticated_customer_id,
+                    "refund_amount": order.amount,
+                    "currency": "USD",
+                    "payment_method": order.payment_method,
+                    "reason": reason,
+                },
+                consent_evidence_ref=consent_evidence_ref,
             ),
-            case.version,
+            actor_id=actor_id,
         )
-        case = await self.kernel.commit_fact(
-            case_id,
-            FactProposal(
-                name="customer_id", value=authenticated_customer_id,
-                authority=FactAuthority.VERIFIED, source="authenticated_context",
-                evidence_ref=f"actor-customer-binding:{authenticated_customer_id}",
-            ),
-            case.version,
-        )
-        case = await self.kernel.commit_fact(
-            case_id,
-            FactProposal(
-                name="refund_amount", value=order.amount, authority=FactAuthority.VERIFIED,
-                source="orders_db", evidence_ref=order.evidence_ref,
-            ),
-            case.version,
-        )
-        command = ActionCommand(
-            action="issue_refund", case_id=case_id, policy_package_id=policy_package_id,
-            actor_id=actor_id, idempotency_key=decision.idempotency_key,
-            parameters={
-                "order_id": order.order_id, "refund_amount": order.amount,
-                "customer_id": authenticated_customer_id, "reason": reason,
-            },
-            parameter_fact_refs={
-                "order_id": "order_id", "refund_amount": "refund_amount",
-                "customer_id": "customer_id",
-            },
-            required_fact_authority={
-                "order_id": FactAuthority.VERIFIED,
-                "refund_amount": FactAuthority.VERIFIED,
-                "customer_id": FactAuthority.VERIFIED,
-            },
-            consent_evidence_ref=consent_evidence_ref,
-        )
-        authorized = await self.gateway.authorize(command, case.version)
-        return await self.gateway.dispatch(authorized)

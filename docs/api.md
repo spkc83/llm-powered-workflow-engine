@@ -45,12 +45,45 @@ recording/transcription consent snapshot. Responses expose acceptance,
 quarantine/duplicate state, risk, streaming permission, success-claim permission,
 and readback requirements.
 
-## Action APIs
+Chat responses retain `response` and `session_id` and now include
+`action_proposals`. Clients must use this structured list rather than parsing
+assistant text to discover actions.
+
+## Conversational action bridge
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/actions/catalog` | Closed action catalog, requirements, permission, and active binding visible to the actor. |
+| POST | `/api/v1/action-proposals` | Prepare a validated pending proposal; performs no provider effect. |
+| GET | `/api/v1/action-proposals` | List proposals created by the actor, optionally by `conversation_id`. |
+| GET | `/api/v1/action-proposals/{proposal_id}` | Read one actor/customer-bound proposal and apply lazy expiry. |
+| POST | `/api/v1/action-proposals/{proposal_id}/confirm` | Capture server-owned host evidence and submit through the typed gateway. |
+| POST | `/api/v1/action-proposals/{proposal_id}/cancel` | Cancel a pending proposal without execution. |
+| GET | `/api/v1/actions/{action_id}` | Actor/customer-bound authoritative action, outcome, and event history. |
+
+Catalog entries include `available`. With a declarative registry, an action that
+has no enabled binding remains visible for discovery but has `available: false`
+and `binding: null`; proposal preparation for it fails closed. Confirm responses
+keep the proposal `action` name and return the typed effect record separately as
+`action_record`.
+
+Proposal creation accepts an action intent, arguments, optional authoritative
+resource reference, and conversation/message correlation. It does not accept
+actor identity, policy ID, evidence, idempotency key, connector binding, endpoint,
+or credential; those are server-derived.
+
+Proposal status is `pending`, `confirmed`, `cancelled`, or `expired`. `confirmed`
+means an action record was created, not that the provider succeeded. Inspect the
+linked action status. Confirmation/cancellation replays are idempotent when they
+match the stored lifecycle; cross-actor/customer access and conflicting transitions
+are rejected.
+
+## Direct typed action and operations APIs
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/core/refunds` | Specialized refund vertical slice with authoritative order reload. |
-| POST | `/api/v1/core/actions` | Discriminated typed command for every other consequential action. |
+| POST | `/api/v1/core/actions` | Discriminated typed command for every consequential action, including refund. |
 | GET | `/api/v1/operations/actions` | Inspect durable action lifecycle/outcome records. |
 | GET | `/api/v1/operations/actions/{id}/events` | Read append-oriented requested/authorized/dispatched/outcome evidence. |
 | POST | `/api/v1/operations/workers/actions:run` | Lease and process due action outbox entries. |
@@ -59,6 +92,27 @@ and readback requirements.
 Action lifecycle is `authorized -> dispatched -> succeeded|failed|unknown`, with
 `unknown -> reconciled|failed|unknown`. Only `succeeded` and `reconciled` support a
 customer-visible success claim.
+
+Direct typed endpoints are for trusted service clients. Customer conversation UIs
+should use proposal/confirmation so the user reviews an authoritative preview.
+
+## MCP action façade
+
+`/mcp` is a FastMCP Streamable HTTP mount protected by the same outer application
+authentication middleware. It is not represented as ordinary OpenAPI operations;
+its location/capabilities are also reported by `/api/v1/integrations/contracts`.
+
+Exposed model surfaces:
+
+- tools: `actions_prepare`, `actions_get_status`;
+- resource: `actions://catalog`;
+- template: `actions://proposals/{proposal_id}`;
+- prompts: `actions_workflow`, `actions_safety`.
+
+There is deliberately no confirm, approve, execute, dispatch, connector, provider,
+or credential tool. Staff hosts must send `X-Workflow-Customer-ID`; optional
+procedure, conversation, and message headers bind trusted context. Customer tokens
+are bound to their own identity. Tool arguments cannot override trusted context.
 
 ## Provider adapter APIs
 

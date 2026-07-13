@@ -13,7 +13,7 @@ import uuid
 import hashlib
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -70,11 +70,25 @@ from workflow_engine.core.policy import (
 from workflow_engine.core.policy_store import PolicyService, create_policy_repository
 from workflow_engine.core.action_service import (
     ACTION_PERMISSIONS,
+    ActionPayload,
+    AuthoritativeResourceRef,
     ConsequentialActionRequest,
     ConsequentialActionService,
 )
+from workflow_engine.actions import (
+    ActionBridge,
+    ActionConfirmationContext,
+    ActionIntent,
+    TrustedActionContext,
+)
+from workflow_engine.core.action_specs import ACTION_SPECIFICATIONS
 from workflow_engine.core.workers import ActionDeliveryWorker, ReconciliationWorker
-from workflow_engine.core.kernel import ActionStatus, OutboxStatus
+from workflow_engine.core.kernel import (
+    ActionProposalStatus,
+    ActionRecord,
+    ActionStatus,
+    OutboxStatus,
+)
 from workflow_engine.core.jurisdiction import JurisdictionGuard, load_jurisdiction_profile
 from workflow_engine.auth.models import Permission
 from workflow_engine.conversation.runtime import ChannelKind, ConversationRuntime, MessageEnvelope
@@ -107,7 +121,21 @@ from workflow_engine.integrations.sandbox import (
     StubSpeechToTextAdapter,
     StubTextToSpeechAdapter,
 )
-from workflow_engine.integrations.loading import ProviderBundle, validate_provider_bundle
+from workflow_engine.integrations.loading import (
+    ProviderBundle,
+    load_action_connector_registry,
+    validate_provider_bundle,
+)
+from workflow_engine.integrations.registry import (
+    ActionConnectorRegistry,
+    ActionRegistryConfig,
+    SQLiteActionBinding,
+)
+from workflow_engine.integrations.resources import (
+    ChainedResourceProvider,
+    ReferenceDataResourceProvider,
+)
+from workflow_engine.mcp import create_action_mcp_server
 from workflow_engine.settings import UpstreamMode
 
 # --- Initialize logging ---
@@ -183,7 +211,8 @@ async def lifespan(app: FastAPI):
         "enabled" if settings.auth_enabled else "disabled",
     )
 
-    yield
+    async with action_mcp_server.session_manager.run():
+        yield
 
     # Shutdown
     await close_connection()
@@ -355,7 +384,9 @@ elif settings.effective_upstream_mode is UpstreamMode.SANDBOX:
     stt_provider = StubSpeechToTextAdapter()
     tts_provider = StubTextToSpeechAdapter()
     telephony_provider = LocalTelephonyAdapter()
-    authoritative_resources = sandbox_action_connector
+    authoritative_resources = ChainedResourceProvider(
+        sandbox_action_connector, ReferenceDataResourceProvider()
+    )
 else:
     default_action_connector = DisabledActionConnector()
     handoff_provider = SQLiteHandoffQueueAdapter(settings.sandbox_sqlite_path)
@@ -364,33 +395,65 @@ else:
     stt_provider = StubSpeechToTextAdapter()
     tts_provider = StubTextToSpeechAdapter()
     telephony_provider = LocalTelephonyAdapter()
-    authoritative_resources = sandbox_action_connector
+    authoritative_resources = ChainedResourceProvider(
+        sandbox_action_connector, ReferenceDataResourceProvider()
+    )
 jurisdiction_profile = load_jurisdiction_profile(
     settings.jurisdiction_profile, settings.jurisdiction_config_path
 )
 jurisdiction_guard = JurisdictionGuard(
     jurisdiction_profile, enforce=settings.effective_jurisdiction_enforcement
 )
-consequential_connectors = {
-    name: default_action_connector
-    for name in ACTION_PERMISSIONS
-}
+consequential_connectors = {name: default_action_connector for name in ACTION_PERMISSIONS}
+configured_action_registry = load_action_connector_registry(
+    settings,
+    sqlite_connectors={
+        **{name: sandbox_action_connector for name in ACTION_SPECIFICATIONS},
+        "issue_refund": DatabaseRefundConnector(),
+    },
+)
+if configured_action_registry is not None:
+    action_connectors = configured_action_registry
+elif settings.effective_upstream_mode is UpstreamMode.SANDBOX:
+    demo_bindings = [
+        SQLiteActionBinding(
+            action_name=name,
+            binding_id=f"sqlite-demo:{name}",
+            binding_version="1",
+            contract_version="v1",
+        )
+        for name in ACTION_SPECIFICATIONS
+    ]
+    action_connectors = ActionConnectorRegistry(
+        ActionRegistryConfig(bindings=demo_bindings),
+        environment=settings.environment,
+        sqlite_connectors={
+            **{name: sandbox_action_connector for name in ACTION_SPECIFICATIONS},
+            "issue_refund": DatabaseRefundConnector(),
+        },
+    )
+else:
+    action_connectors = {
+        "issue_refund": default_action_connector,
+        **consequential_connectors,
+    }
 core_gateway = ActionGateway(
     core_kernel,
-    {
-        "issue_refund": (
-            DatabaseRefundConnector()
-            if settings.effective_upstream_mode is UpstreamMode.SANDBOX
-            else default_action_connector
-        ),
-        **consequential_connectors,
-    },
+    action_connectors,
     policy_registry=policy_registry,
     policy_resolver=policy_service,
 )
 core_engine = CoreEngine(core_kernel, core_gateway, RefundDecisionService())
 consequential_action_service = ConsequentialActionService(
     core_kernel, core_gateway, authoritative_resources
+)
+action_bridge = ActionBridge(
+    kernel=core_kernel,
+    action_service=consequential_action_service,
+    resources=authoritative_resources,
+    connector_resolver=(
+        action_connectors if callable(getattr(action_connectors, "resolve", None)) else None
+    ),
 )
 action_worker = ActionDeliveryWorker(
     core_store,
@@ -404,6 +467,157 @@ reconciliation_worker = ReconciliationWorker(
 )
 conversation_runtime = ConversationRuntime(core_store)
 ivr_adapter = IvrAdapter()
+
+
+_POLICY_BY_PROCEDURE = {
+    "cs_refund": active_refund_policy,
+    "cs_eft_dispute": active_reg_e_policy,
+    "fraud_alert_triage": active_fraud_policy,
+}
+_DEFAULT_PROCEDURE_BY_ACTION = {
+    "issue_refund": "cs_refund",
+    "issue_store_credit": "cs_refund",
+    "update_case_status": "cs_refund",
+    "file_eft_dispute": "cs_eft_dispute",
+    "issue_provisional_credit": "cs_eft_dispute",
+    "escalate_to_supervisor": "cs_refund",
+    "add_case_note": "cs_refund",
+    "flag_account": "fraud_alert_triage",
+    "submit_sar": "fraud_alert_triage",
+    "close_alert": "fraud_alert_triage",
+}
+
+
+def _require_action_access(actor: UserContext, action: str) -> None:
+    if action not in ACTION_PERMISSIONS:
+        raise ValidationError(f"Unknown consequential action: {action}")
+    if actor.role is Role.CUSTOMER and action == "issue_refund":
+        return
+    _require_permission(actor, ACTION_PERMISSIONS[action])
+
+
+def _action_policy(action: str, requested_procedure: str | None = None):
+    procedure_id = (
+        requested_procedure
+        if requested_procedure in _POLICY_BY_PROCEDURE
+        else _DEFAULT_PROCEDURE_BY_ACTION[action]
+    )
+    policy = _POLICY_BY_PROCEDURE[procedure_id]
+    if action not in set(policy.rules.get("allowed_actions", [])):
+        procedure_id = _DEFAULT_PROCEDURE_BY_ACTION[action]
+        policy = _POLICY_BY_PROCEDURE[procedure_id]
+    return procedure_id, policy
+
+
+def _action_case_id(
+    action: str,
+    customer_id: str,
+    conversation_id: str | None,
+    arguments: dict[str, Any],
+) -> str:
+    if action == "issue_refund" and arguments.get("order_id"):
+        material = f"{customer_id}:{arguments['order_id']}"
+        prefix = "REFUND"
+    else:
+        material = repr((customer_id, conversation_id, action, arguments))
+        prefix = action.replace("_", "-").upper()[:32]
+    digest = hashlib.sha256(material.encode()).hexdigest()[:16].upper()
+    return f"CASE-{prefix}-{digest}"
+
+
+def _proposal_view(proposal) -> dict[str, Any]:
+    value = proposal.model_dump(mode="json")
+    value["safe_preview"] = value.pop("preview", proposal.preview)
+    value["state"] = value["status"]
+    return value
+
+
+async def _create_action_proposal(
+    *,
+    actor: UserContext,
+    customer_id: str,
+    action: str,
+    arguments: dict[str, Any],
+    resource: AuthoritativeResourceRef | None,
+    conversation_id: str | None,
+    message_id: str | None,
+    requested_procedure: str | None = None,
+):
+    _require_action_access(actor, action)
+    procedure_id, policy = _action_policy(action, requested_procedure)
+    return await action_bridge.propose(
+        ActionIntent(
+            action=action,
+            arguments=arguments,
+            resource_type=resource.resource_type if resource else None,
+            resource_id=resource.resource_id if resource else None,
+        ),
+        context=TrustedActionContext(
+            actor_id=actor.user_id,
+            customer_id=customer_id,
+            case_id=_action_case_id(action, customer_id, conversation_id, arguments),
+            procedure_id=procedure_id,
+            procedure_version=policy.version,
+            policy_package_id=policy.package_id,
+            conversation_id=conversation_id,
+            message_id=message_id,
+        ),
+    )
+
+
+async def _resolve_mcp_action_context(
+    context,
+    action: str | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> TrustedActionContext:
+    """Derive MCP identity from authenticated transport metadata, never tool args."""
+    request = context.request_context.request
+    if request is None:
+        raise AuthorizationError("MCP request context is unavailable")
+    actor = getattr(request.state, "user", None)
+    if actor is None:
+        raise AuthorizationError("MCP request is not authenticated")
+    requested_customer = request.headers.get("X-Workflow-Customer-ID")
+    if actor.role is Role.CUSTOMER:
+        requested_customer = actor.user_id
+    elif not requested_customer and settings.is_dev:
+        requested_customer = "CUST-456"
+    if not requested_customer:
+        raise AuthorizationError("MCP host must bind X-Workflow-Customer-ID")
+    customer = resolve_customer_context(actor, requested_customer)
+    selected_action = action or "issue_refund"
+    if action is not None:
+        _require_action_access(actor, action)
+    requested_procedure = request.headers.get("X-Workflow-Procedure-ID")
+    procedure_id, policy = _action_policy(selected_action, requested_procedure)
+    conversation_id = request.headers.get("X-Workflow-Conversation-ID") or str(
+        context.request_id
+    )
+    message_id = request.headers.get("X-Workflow-Message-ID") or str(
+        context.request_id
+    )
+    return TrustedActionContext(
+        actor_id=actor.user_id,
+        customer_id=customer.customer_id,
+        case_id=_action_case_id(
+            selected_action,
+            customer.customer_id,
+            conversation_id,
+            arguments or {},
+        ),
+        procedure_id=procedure_id,
+        procedure_version=policy.version,
+        policy_package_id=policy.package_id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+
+
+action_mcp_server = create_action_mcp_server(
+    action_bridge,
+    _resolve_mcp_action_context,
+)
+app.mount("/mcp", action_mcp_server.streamable_http_app(), name="action-mcp")
 
 
 # --- Pydantic models ---
@@ -429,6 +643,38 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    action_proposals: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ActionProposalRequest(BaseModel):
+    """Host request for an untrusted intent; trusted context is server-derived."""
+
+    customer_id: str = Field(min_length=1, max_length=100)
+    action: str = Field(min_length=1, max_length=100)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    resource: AuthoritativeResourceRef | None = None
+    conversation_id: str | None = Field(default=None, max_length=300)
+    message_id: str | None = Field(default=None, max_length=300)
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "customer_id": "CUST-456",
+                    "action": "issue_refund",
+                    "arguments": {
+                        "order_id": "ORD-123",
+                        "reason": "item not received",
+                    },
+                    "resource": {
+                        "resource_type": "order",
+                        "resource_id": "ORD-123",
+                    },
+                    "conversation_id": "demo-session-1",
+                }
+            ]
+        }
+    }
 
 
 class RefundCommandRequest(BaseModel):
@@ -514,6 +760,7 @@ class WebSocketResponseFrame(BaseModel):
     text: str
     risk: RiskLevel
     may_stream: bool
+    action_proposals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CreateHandoffRequest(BaseModel):
@@ -583,6 +830,72 @@ class HealthResponse(BaseModel):
     auth_enabled: bool
     upstream_mode: str
     jurisdiction_profile: str
+
+
+class ActionBindingResponse(BaseModel):
+    binding_id: str
+    binding_version: str
+    contract_version: str
+
+
+class ActionCatalogItemResponse(BaseModel):
+    name: str
+    required_parameters: list[str]
+    authoritative_parameters: list[str]
+    requires_consent: bool
+    requires_approval: bool
+    permission: str
+    available: bool
+    binding: ActionBindingResponse | None = None
+
+
+class ActionCatalogResponse(BaseModel):
+    actions: list[ActionCatalogItemResponse]
+    count: int
+
+
+class ActionProposalResponse(BaseModel):
+    proposal_id: str
+    action: str
+    payload: ActionPayload
+    case_id: str
+    customer_id: str
+    actor_id: str
+    procedure_id: str
+    procedure_version: str
+    policy_package_id: str
+    idempotency_key: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    resource_version: int | None = None
+    conversation_id: str | None = None
+    message_id: str | None = None
+    connector_binding_id: str | None = None
+    connector_binding_version: str | None = None
+    contract_version: str | None = None
+    safe_preview: dict[str, Any] = Field(default_factory=dict)
+    status: ActionProposalStatus
+    state: ActionProposalStatus
+    confirmation_evidence_ref: str | None = None
+    action_id: str | None = None
+    created_at: str
+    expires_at: str
+    updated_at: str
+    confirmed_at: str | None = None
+    cancelled_at: str | None = None
+
+
+class ActionProposalConfirmationResponse(ActionProposalResponse):
+    action_record: ActionRecord | None = None
+
+
+class ActionProposalListResponse(BaseModel):
+    action_proposals: list[ActionProposalResponse]
+
+
+class ActionStatusResponse(BaseModel):
+    action: ActionRecord
+    events: list[dict[str, Any]]
 
 
 # --- Workflow state keys to expose ---
@@ -691,7 +1004,51 @@ async def _generate_safe_turn(context: TurnContext, text: str) -> GeneratedTurn:
             risk = RiskLevel.REGULATED
         elif active_procedure_id in {"cs_refund", "fraud_alert_triage"}:
             risk = RiskLevel.CONSEQUENTIAL
-        return GeneratedTurn(text=response_text, risk=risk)
+        proposal_views: list[dict[str, Any]] = []
+        pending_intents = list(session.state.get("pending_action_intents", []))
+        # Clear first so a failed proposal cannot be replayed silently on the next
+        # turn. The model may propose it again after the customer corrects inputs.
+        session.state["pending_action_intents"] = []
+        trusted_actor = UserContext(
+            user_id=context.actor_id,
+            role=Role(context.actor_role),
+            permissions=set(context.actor_permissions),
+        )
+        for raw_intent in pending_intents:
+            try:
+                resource_data = raw_intent.get("resource")
+                resource = (
+                    AuthoritativeResourceRef.model_validate(resource_data)
+                    if resource_data
+                    else None
+                )
+                proposal = await _create_action_proposal(
+                    actor=trusted_actor,
+                    customer_id=context.customer_id,
+                    action=str(raw_intent["action"]),
+                    arguments=dict(raw_intent.get("arguments", {})),
+                    resource=resource,
+                    conversation_id=context.conversation_id,
+                    message_id=context.message_id,
+                    requested_procedure=active_procedure_id,
+                )
+                proposal_views.append(_proposal_view(proposal))
+            except Exception as exc:
+                logger.warning(
+                    "Action intent could not be prepared (conversation=%s action=%s type=%s)",
+                    context.conversation_id,
+                    raw_intent.get("action"),
+                    type(exc).__name__,
+                )
+                response_text += (
+                    "\n\nI could not prepare that action safely. No action was "
+                    "executed; please verify the requested resource and details."
+                )
+        return GeneratedTurn(
+            text=response_text,
+            risk=risk,
+            action_proposals=proposal_views,
+        )
 
 
 conversation_service = ConversationService(conversation_runtime, _generate_safe_turn)
@@ -743,8 +1100,14 @@ async def chat_v1(
         owner_id=owner_id,
     )
     if result.duplicate:
-        return ChatResponse(response="This message was already received.", session_id=session_id)
-    return ChatResponse(response=result.response or "", session_id=session_id)
+        return ChatResponse(
+            response="This message was already received.", session_id=session_id
+        )
+    return ChatResponse(
+        response=result.response or "",
+        session_id=session_id,
+        action_proposals=result.action_proposals,
+    )
 
 
 @app.post(
@@ -930,6 +1293,204 @@ async def process_conversation_turn(
     )
 
 
+@app.get(
+    f"{settings.api_prefix}/actions/catalog",
+    response_model=ActionCatalogResponse,
+    tags=["action-bridge"],
+    summary="List the closed action catalog and active provider bindings",
+)
+async def list_action_catalog(
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    binding_capabilities = {
+        item["action_name"]: item
+        for item in (
+            action_connectors.capabilities()
+            if callable(getattr(action_connectors, "capabilities", None))
+            else []
+        )
+    }
+    actions = []
+    for name, specification in ACTION_SPECIFICATIONS.items():
+        permitted = actor.has_permission(ACTION_PERMISSIONS[name]) or (
+            actor.role is Role.CUSTOMER and name == "issue_refund"
+        )
+        if actor.role is not Role.ADMIN and not permitted:
+            continue
+        actions.append(
+            {
+                "name": name,
+                "required_parameters": sorted(specification.required_parameters),
+                "authoritative_parameters": sorted(
+                    specification.authoritative_parameters
+                ),
+                "requires_consent": specification.requires_consent,
+                "requires_approval": specification.requires_approval,
+                "permission": ACTION_PERMISSIONS[name].value,
+                "available": (
+                    name in binding_capabilities
+                    if callable(getattr(action_connectors, "capabilities", None))
+                    else True
+                ),
+                "binding": binding_capabilities.get(name),
+            }
+        )
+    return {"actions": actions, "count": len(actions)}
+
+
+@app.post(
+    f"{settings.api_prefix}/action-proposals",
+    response_model=ActionProposalResponse,
+    tags=["action-bridge"],
+    summary="Prepare a consequential action without executing it",
+)
+async def create_action_proposal(
+    request: ActionProposalRequest,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    customer = resolve_customer_context(actor, request.customer_id)
+    _require_upstream_available()
+    await core_store.initialize()
+    proposal = await _create_action_proposal(
+        actor=actor,
+        customer_id=customer.customer_id,
+        action=request.action,
+        arguments=request.arguments,
+        resource=request.resource,
+        conversation_id=request.conversation_id,
+        message_id=request.message_id,
+    )
+    return _proposal_view(proposal)
+
+
+@app.get(
+    f"{settings.api_prefix}/action-proposals",
+    response_model=ActionProposalListResponse,
+    tags=["action-bridge"],
+    summary="List action proposals created by the authenticated actor",
+)
+async def list_action_proposals(
+    conversation_id: str | None = None,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    await core_store.initialize()
+    proposals = await core_store.list_action_proposals(
+        conversation_id=conversation_id,
+        limit=100,
+    )
+    visible = [proposal for proposal in proposals if proposal.actor_id == actor.user_id]
+    return {"action_proposals": [_proposal_view(item) for item in visible]}
+
+
+async def _owned_proposal(proposal_id: str, actor: UserContext):
+    proposal = await core_store.get_action_proposal(proposal_id)
+    if proposal is None:
+        raise NotFoundError("ActionProposal", proposal_id)
+    resolve_customer_context(actor, proposal.customer_id)
+    if proposal.actor_id != actor.user_id:
+        raise AuthorizationError("Action proposal belongs to a different actor")
+    return proposal
+
+
+@app.get(
+    f"{settings.api_prefix}/action-proposals/{{proposal_id}}",
+    response_model=ActionProposalResponse,
+    tags=["action-bridge"],
+    summary="Get one actor- and customer-bound action proposal",
+)
+async def get_action_proposal(
+    proposal_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    await core_store.initialize()
+    proposal = await _owned_proposal(proposal_id, actor)
+    proposal = await action_bridge.status(
+        proposal.proposal_id,
+        customer_id=proposal.customer_id,
+        actor_id=actor.user_id,
+    )
+    return _proposal_view(proposal)
+
+
+@app.post(
+    f"{settings.api_prefix}/action-proposals/{{proposal_id}}/confirm",
+    response_model=ActionProposalConfirmationResponse,
+    tags=["action-bridge"],
+    summary="Capture trusted host confirmation and submit through the typed gateway",
+)
+async def confirm_action_proposal(
+    proposal_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_upstream_available()
+    await core_store.initialize()
+    proposal = await _owned_proposal(proposal_id, actor)
+    _require_action_access(actor, proposal.action)
+    evidence = f"host-confirmation:{proposal_id}:{uuid.uuid4().hex}"
+    confirmed = await action_bridge.confirm(
+        proposal_id,
+        context=ActionConfirmationContext(
+            actor_id=actor.user_id,
+            customer_id=proposal.customer_id,
+            consent_evidence_ref=evidence,
+            approval_evidence_ref=evidence,
+        ),
+    )
+    response: dict[str, Any] = _proposal_view(confirmed)
+    if confirmed.action_id:
+        action = await core_store.get_action(confirmed.action_id)
+        response["action_record"] = action.model_dump(mode="json") if action else None
+    return response
+
+
+@app.post(
+    f"{settings.api_prefix}/action-proposals/{{proposal_id}}/cancel",
+    response_model=ActionProposalResponse,
+    tags=["action-bridge"],
+    summary="Cancel a pending action proposal without executing it",
+)
+async def cancel_action_proposal(
+    proposal_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    await core_store.initialize()
+    proposal = await _owned_proposal(proposal_id, actor)
+    cancelled = await action_bridge.cancel(
+        proposal_id,
+        context=ActionConfirmationContext(
+            actor_id=actor.user_id,
+            customer_id=proposal.customer_id,
+        ),
+    )
+    return _proposal_view(cancelled)
+
+
+@app.get(
+    f"{settings.api_prefix}/actions/{{action_id}}",
+    response_model=ActionStatusResponse,
+    tags=["action-bridge"],
+    summary="Get authoritative action status, outcome, and event history",
+)
+async def get_action_status(
+    action_id: str,
+    actor: UserContext = Depends(get_current_user),
+) -> dict[str, Any]:
+    await core_store.initialize()
+    action = await core_store.get_action(action_id)
+    if action is None:
+        raise NotFoundError("Action", action_id)
+    case = await core_store.get_case(action.command.case_id)
+    if case is None:
+        raise NotFoundError("Case", action.command.case_id)
+    resolve_customer_context(actor, case.customer_id)
+    if action.command.actor_id != actor.user_id:
+        raise AuthorizationError("Action belongs to a different actor")
+    return {
+        "action": action.model_dump(mode="json"),
+        "events": await core_store.list_action_events(action_id),
+    }
+
+
 @app.post(
     f"{settings.api_prefix}/core/actions",
     tags=["core-actions"],
@@ -1042,6 +1603,20 @@ async def integration_contracts() -> dict:
         "websocket_response_schema": WebSocketResponseFrame.model_json_schema(),
         "conversation_turn_schema": ConversationTurnRequest.model_json_schema(),
         "action_schema": ConsequentialActionRequest.model_json_schema(),
+        "action_proposal_schema": ActionProposalRequest.model_json_schema(),
+        "action_proposal_endpoints": {
+            "catalog": f"{settings.api_prefix}/actions/catalog",
+            "collection": f"{settings.api_prefix}/action-proposals",
+            "confirm": f"{settings.api_prefix}/action-proposals/{{proposal_id}}/confirm",
+            "cancel": f"{settings.api_prefix}/action-proposals/{{proposal_id}}/cancel",
+            "status": f"{settings.api_prefix}/actions/{{action_id}}",
+        },
+        "mcp": {
+            "url": "/mcp",
+            "transport": "streamable-http",
+            "model_tools": ["actions_prepare", "actions_get_status"],
+            "host_confirmation_tool_exposed": False,
+        },
         "stt_schema": SttRequest.model_json_schema(),
         "tts_schema": TtsRequest.model_json_schema(),
         "telephony_event_schema": TelephonyEvent.model_json_schema(),
@@ -1503,6 +2078,7 @@ async def websocket_chat(websocket: WebSocket):
                     "text": result.response,
                     "risk": result.risk.value,
                     "may_stream": result.may_stream,
+                    "action_proposals": result.action_proposals,
                 }
             )
             await websocket.send_json({"type": "stream_end", "session_id": session_id})
@@ -1648,5 +2224,14 @@ async def readiness() -> dict:
         "active_policy_packages": len(active),
         "upstream_mode": settings.effective_upstream_mode.value,
         "provider_bundle_loaded": provider_bundle is not None,
+        "action_registry_loaded": callable(getattr(action_connectors, "resolve", None)),
+        "action_registry_source": (
+            "configured"
+            if configured_action_registry is not None
+            else "generated-demo"
+            if settings.effective_upstream_mode is UpstreamMode.SANDBOX
+            else "legacy-provider-bundle"
+        ),
+        "mcp_endpoint": "/mcp",
     }
     SQLiteDeliveryReceiptStore,

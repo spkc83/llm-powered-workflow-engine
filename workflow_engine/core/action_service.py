@@ -15,6 +15,16 @@ from workflow_engine.core.kernel import (
 )
 
 
+class IssueRefundPayload(BaseModel):
+    action: Literal["issue_refund"]
+    order_id: str
+    customer_id: str
+    refund_amount: float = Field(gt=0)
+    currency: str = "USD"
+    payment_method: str
+    reason: str
+
+
 class StoreCreditPayload(BaseModel):
     action: Literal["issue_store_credit"]
     order_id: str
@@ -79,7 +89,8 @@ class CloseAlertPayload(BaseModel):
 
 
 ActionPayload = Annotated[
-    StoreCreditPayload
+    IssueRefundPayload
+    | StoreCreditPayload
     | CaseStatusPayload
     | EftDisputePayload
     | ProvisionalCreditPayload
@@ -108,6 +119,9 @@ class ConsequentialActionRequest(BaseModel):
     payload: ActionPayload
     consent_evidence_ref: str | None = None
     approval_evidence_ref: str | None = None
+    connector_binding_id: str | None = None
+    connector_binding_version: str | None = None
+    contract_version: str | None = None
 
     model_config = {
         "json_schema_extra": {
@@ -136,6 +150,7 @@ class ConsequentialActionRequest(BaseModel):
 
 
 ACTION_PERMISSIONS: dict[str, Permission] = {
+    "issue_refund": Permission.REFUND_WRITE,
     "issue_store_credit": Permission.REFUND_WRITE,
     "update_case_status": Permission.CASE_WRITE,
     "file_eft_dispute": Permission.CASE_WRITE,
@@ -173,11 +188,23 @@ class ConsequentialActionService:
             requested_parameters = request.payload.model_dump(
                 exclude={"action"}, mode="json"
             )
+            duplicate_parameters = duplicate.command.parameters
+            if request.payload.action == "issue_refund":
+                # v3.1 refund commands predate explicit currency/payment-method
+                # fields. Their existing effect remains the idempotent authority;
+                # compare every field that was originally bound rather than
+                # rejecting a safe schema enrichment during upgrade.
+                parameters_match = all(
+                    requested_parameters.get(name) == value
+                    for name, value in duplicate_parameters.items()
+                )
+            else:
+                parameters_match = duplicate_parameters == requested_parameters
             if (
                 duplicate.command.case_id != request.case_id
                 or duplicate.command.action != request.payload.action
                 or duplicate.command.policy_package_id != request.policy_package_id
-                or duplicate.command.parameters != requested_parameters
+                or not parameters_match
             ):
                 raise ValueError(
                     "Idempotency key is already bound to a different action request"
@@ -205,7 +232,17 @@ class ConsequentialActionService:
             )
             if resource is None:
                 raise ValueError("Authoritative resource was not found")
-            upstream_payload = resource["payload"]
+            upstream_payload = self._normalize_resource_payload(action, resource["payload"])
+            binding = specification.customer_binding_parameter
+            if binding is not None:
+                if binding not in upstream_payload:
+                    raise ValueError(
+                        f"Authoritative resource is missing customer binding {binding}"
+                    )
+                if str(upstream_payload[binding]) != request.customer_id:
+                    raise ValueError(
+                        "Authoritative resource does not belong to the serviced customer"
+                    )
             evidence_ref = (
                 f"sandbox:{request.resource.resource_type}:{request.resource.resource_id}:"
                 f"v{resource['version']}"
@@ -258,6 +295,21 @@ class ConsequentialActionService:
             required_fact_authority=authorities,
             consent_evidence_ref=request.consent_evidence_ref,
             approval_evidence_ref=request.approval_evidence_ref,
+            connector_binding_id=request.connector_binding_id,
+            connector_binding_version=request.connector_binding_version,
+            contract_version=request.contract_version,
         )
         authorized = await self.gateway.authorize(command, case.version)
         return await self.gateway.dispatch(authorized)
+
+    @staticmethod
+    def _normalize_resource_payload(
+        action: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        if action == "issue_refund":
+            if "refund_amount" not in normalized and "amount" in normalized:
+                normalized["refund_amount"] = normalized["amount"]
+        if action in {"issue_refund", "issue_store_credit"} and "currency" not in normalized:
+            normalized["currency"] = "USD"
+        return normalized

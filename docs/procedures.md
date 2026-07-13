@@ -258,7 +258,7 @@ switches an active case to a newer policy version.
 
 ## v3 consequential-action authoring
 
-A procedure step may gather inputs or propose `issue_store_credit`,
+A procedure step may gather inputs or propose `issue_refund`, `issue_store_credit`,
 `update_case_status`, `file_eft_dispute`, `issue_provisional_credit`,
 `escalate_to_supervisor`, `add_case_note`, `flag_account`, `submit_sar`, or
 `close_alert`. It does not make that proposal authoritative. Add or change a
@@ -275,3 +275,10 @@ consequential action only with all of the following:
 
 SAR narratives are referenced through a secure `narrative_ref`; do not place
 regulated narrative text in procedure YAML, prompts, or generic action payloads.
+
+In v3.2 the callable behind each consequential name is proposal-only. It queues an
+intent in ADK state and returns `confirmation_required`. Trusted host code validates
+and persists the proposal after the model turn. Procedure instructions must tell the
+customer to review the structured confirmation card and must never imply that the
+tool return means success. Do not add confirmation, provider URL, credential,
+policy, actor/customer, or evidence arguments to model tools.

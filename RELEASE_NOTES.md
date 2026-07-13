@@ -1,36 +1,40 @@
-# LLM-Powered Workflow Engine v3.1.0
+# LLM-Powered Workflow Engine v3.2.0
 
-v3.1 closes the largest usability and honesty gaps found in the end-to-end v3 audit.
+v3.2 connects customer conversation to the typed action core without making the
+model an authorization boundary.
 
 ## Application changes
 
-- The Shiny development/operator console now uses canonical `/api/v1` routes,
-  honors Docker `BACKEND_URL`, supports an optional bearer token, and includes a
-  system status view.
-- `UPSTREAM_MODE=provider` now loads a trusted complete `ProviderBundle` for STT,
-  TTS, telephony, chat delivery, handoff, authoritative resources, and actions.
-- Action delivery and reconciliation can run continuously as
-  `python -m workflow_engine.worker` and have a dedicated Compose service.
-- `/ready` verifies storage, active policy, and provider-bundle state separately
-  from process liveness.
-- Production reference Compose no longer advertises four API workers on SQLite.
+- Consequential ADK tools queue intent only and cannot perform an effect.
+- Trusted host code creates durable actor/customer-bound proposals with an
+  authoritative preview, expiry, resource version, policy/procedure context,
+  idempotency, and connector binding versions.
+- Shiny renders structured proposal cards with host-only confirm/cancel and
+  authoritative action/event status.
+- Refund uses the common typed action service and gateway path.
+- A per-action registry supports SQLite demo, pinned REST/OpenAPI, and trusted
+  Python connectors. WebSocket action bindings are contract-only and fail closed.
+- An authenticated Streamable HTTP MCP façade exposes proposal/status tools,
+  resources, and safety prompts without confirmation or execution authority.
+- Swagger exposes catalog, proposal lifecycle, and action status endpoints.
 
 ## Documentation
 
-The README was rewritten and the documentation now includes explicit current-state,
-configuration, UI, testing, architecture, provider, storage, API, and operations
-boundaries. Features are classified as implemented, sandbox, deployment-supplied,
-partial, or out of scope.
+Architecture, action bridge, current-state, configuration, API, UI, integration,
+storage, governance, security, operations, testing, migration, user, and roadmap
+guides describe the exact v3.2 path. They distinguish implemented, simulated,
+contract-only, deployment-supplied, and missing capabilities.
 
-## Verification
+## Verification boundary
 
-- 426 automated tests pass.
-- Ruff, scoped mypy, compileall, Docker Compose validation, documentation parity,
-  and diff checks pass.
-- The Shiny app imports and a live local server smoke renders its HTML.
+The suite covers bridge, registry, REST ambiguity/reconciliation, authoritative
+resources, API/OpenAPI, UI client/helpers, persistence, and existing core behavior.
+It does not certify a vendor provider, complete browser UX, legal interpretation,
+or a deployment database. See `docs/testing.md`.
 
 ## Remaining deployment obligations
 
-No vendor adapters or credentials ship in the repository. Real provider bundles,
-TLS, secret management, monitoring/export, approved database adapters, retention,
-and legal/regulatory approval remain deployment responsibilities.
+No vendor adapters, generic WebSocket provider runtime, MCP confirmation/execution,
+production UI, or production database adapter ships. Real providers, TLS, identity, secrets,
+monitoring/export, approved storage/retention, and legal approval remain deployment
+responsibilities.
